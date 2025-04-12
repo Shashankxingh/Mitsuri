@@ -8,8 +8,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 import psutil
 
 # === Hardcoded API Keys ===
-GEMINI_API_KEY = "your_gemini_api_key_here"
-TELEGRAM_BOT_TOKEN = "your_telegram_bot_token_here"
+GEMINI_API_KEY = "AIzaSyB7IIypw6yTgDLyrn8edj6dD5Xcj6ot5_M"
+TELEGRAM_BOT_TOKEN = "7735653601:AAGA9pjn8tyHVkEeJiZpVqzwvzLnW_mUMXk"
 
 # === Configure Gemini ===
 genai.configure(api_key=GEMINI_API_KEY)
