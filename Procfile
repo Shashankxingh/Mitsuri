@@ -1,1 +1,1 @@
-start: python mitsuri_bot.py
+python mitsuri_bot.py
