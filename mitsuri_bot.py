@@ -98,9 +98,16 @@ async def turn_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_bot_active = False
         await update.message.reply_text("Okayyy~ I'll be quiet now...")
 
+# === Handle Unknown Command ===
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Aree~ mujhe ye samajh nahi aaya. Try something else~")
+
 # === Message Handler ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global is_bot_active
+
+    if not update.message or not update.message.text:
+        return
 
     user_input = update.message.text.strip()
     chat_type = update.message.chat.type
@@ -139,9 +146,10 @@ if __name__ == "__main__":
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex(r"^\.ping$"), ping))
-    app.add_handler(MessageHandler(filters.Regex(r"^\.on$"), turn_on))
-    app.add_handler(MessageHandler(filters.Regex(r"^\.off$"), turn_off))
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.ping$"), ping))
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.on$"), turn_on))
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.off$"), turn_off))
+    app.add_handler(MessageHandler(filters.COMMAND, unknown_command))  # Handle unknown commands
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("Mitsuri is online and full of pyaar!")
