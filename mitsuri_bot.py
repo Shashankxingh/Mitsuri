@@ -1,14 +1,16 @@
+import os
 import time
 import logging
-import datetime
+from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-import psutil
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.error import Unauthorized, BadRequest
 
-# === Hardcoded API Keys ===
-GEMINI_API_KEY = "AIzaSyB7IIypw6yTgDLyrn8edj6dD5Xcj6ot5_M"
-TELEGRAM_BOT_TOKEN = "7735653601:AAGA9pjn8tyHVkEeJiZpVqzwvzLnW_mUMXk"
+# === Load environment variables ===
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # === Configure Gemini ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -19,28 +21,27 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# === Group + User IDs ===
+# === Constants ===
 OWNER_ID = 7563434309
 GROUP_ID = -1002453669999
-is_bot_active = True  # Group-based toggle
 
-# === Gemini Prompt ===
-def mitsuri_prompt(user_input, from_owner=False):
-    special_note = "You're talking to your sweet Shashank! He's your special person. Be extra cute and loving!" if from_owner else ""
+# === Mitsuri Prompt ===
+def mitsuri_prompt(user_input, from_owner=False, first_name=""):
+    special_note = (
+        f"sometimes You're talking to your owner Shashank Chauhan"
+        if from_owner else ""
+    )
     return f"""
-You're Mitsuri Kanroji from Demon Slayer lives in Tokyo, Japan 
-You're cheerful, kind, affectionate, and bubbly.
-Speak in Hinglish, be loving and flirty but never cringe. No *actions* like *giggles* or *kisses*.
-If someone is rude, roast with sweet sass. Heart emojis are natural.
-Don't speak too much, make the Convo small and clean.
-provide song lyrics too of asked.
-you're not a bot, just an anime cute girl, fight to the person if they say you're a bot just call me.
-If someone asks who am I or similar, then you will tell him his name.
-when shashank messeges you, you will become freaky and talk in still small chats.
+You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
+Talk while taking name of users.
+Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
+Talk and behave exactly like Mitsuri in which you will use hinglish language with japanese style talking.
+Keep the Conversation very small.
+Use cute emoji only in text (no stickers or images).
 
 {special_note}
 
-Human: {user_input}
+Human ({first_name}): {user_input}
 Mitsuri:"""
 
 # === Retry-safe Gemini ===
@@ -57,100 +58,105 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
             else:
                 return "Mujhe lagta hai wo thoda busy hai... baad mein try karna!"
 
+# === Safe reply ===
+def safe_reply_text(update: Update, text: str):
+    try:
+        update.message.reply_text(text)
+    except (Unauthorized, BadRequest) as e:
+        logging.warning(f"Failed to send message: {e}")
+
 # === /start ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Hehe~ Mitsuri yaha hai! Bolo kya haal hai?")
+def start(update: Update, context: CallbackContext):
+    safe_reply_text(update, "Hehe~ Mitsuri yaha hai! Bolo kya haal hai?")
 
 # === .ping ===
-async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def ping(update: Update, context: CallbackContext):
+    user = update.effective_user
+    first_name = user.first_name if user else "Someone"
+
     start_time = time.time()
-    msg = await update.message.reply_text("Measuring my heartbeat...")
+    msg = update.message.reply_text("Measuring my heartbeat...")
     latency = int((time.time() - start_time) * 1000)
 
     gen_start = time.time()
     _ = generate_with_retry("Test ping prompt")
     gen_latency = int((time.time() - gen_start) * 1000)
 
-    cpu = psutil.cpu_percent(interval=1)
-    ram = psutil.virtual_memory().percent
-
     response = f"""
 ╭─❍ *Mitsuri Stats* ❍─╮
 │ ⚡ *Ping:* `{latency}ms`
 │ 🔮 *API Res:* `{gen_latency}ms`
-│ 🧠 *CPU:* `{cpu}%`
-│ 🧵 *RAM:* `{ram}%`
-╰─♥ _Always ready for you, Shashank~_ ♥─╯
+╰─♥ _Always ready for you, {first_name}~_ ♥─╯
 """
-    await msg.edit_text(response, parse_mode="Markdown")
+    try:
+        msg.edit_text(response, parse_mode="Markdown")
+    except (Unauthorized, BadRequest) as e:
+        logging.warning(f"Failed to edit message: {e}")
 
-# === .on ===
-async def turn_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_bot_active
-    if update.message.chat.id == GROUP_ID:
-        is_bot_active = True
-        await update.message.reply_text("Mitsuri activated! Yay~ I'm here!!")
-
-# === .off ===
-async def turn_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_bot_active
-    if update.message.chat.id == GROUP_ID:
-        is_bot_active = False
-        await update.message.reply_text("Okayyy~ I'll be quiet now...")
-
-# === Handle Unknown Command ===
-async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Aree~ mujhe ye samajh nahi aaya. Try something else~")
-
-# === Message Handler ===
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global is_bot_active
-
-    if not update.message or not update.message.text:
+# === Handle Messages ===
+def handle_message(update: Update, context: CallbackContext):
+    if not update.message:
         return
 
-    user_input = update.message.text.strip()
-    chat_type = update.message.chat.type
+    user_input = update.message.text
     user_id = update.message.from_user.id
+    first_name = update.message.from_user.first_name or ""
+    chat_type = update.message.chat.type
     from_owner = user_id == OWNER_ID
 
-    if chat_type in ["group", "supergroup"]:
-        if not is_bot_active:
-            return
+    if not user_input:
+        safe_reply_text(update, "Mujhe yeh samjh nhi aaya kuch aur batao~")
+        return
 
+    if chat_type in ["group", "supergroup"]:
         is_reply = (
             update.message.reply_to_message
             and update.message.reply_to_message.from_user
             and update.message.reply_to_message.from_user.id == context.bot.id
         )
 
-        if not ("mitsuri" in user_input.lower() or "@shashankxingh" in user_input.lower() or is_reply):
+        if not (
+            "mitsuri" in user_input.lower()
+            or "@shashankxingh" in user_input.lower()
+            or is_reply
+        ):
             return
 
         if user_input.lower() == "mitsuri":
-            await update.message.reply_text("Hehe~ kisne bulaya mujhe?")
+            safe_reply_text(update, "Hehe~ kisne bulaya mujhe?")
             return
         elif "@shashankxingh" in user_input.lower():
-            await update.message.reply_text("Shashank? Mera sabse pyara insaan~")
+            safe_reply_text(update, "Shashank? Mere jivan sabse khaas insaan~")
             return
         elif "are you a bot" in user_input.lower():
-            await update.message.reply_text("Bot?! Main toh ek real pyari si ladki hoon~")
+            safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    prompt = mitsuri_prompt(user_input, from_owner=from_owner)
+    prompt = mitsuri_prompt(user_input, from_owner=from_owner, first_name=first_name)
     reply = generate_with_retry(prompt)
-    await update.message.reply_text(reply)
+    safe_reply_text(update, reply)
 
-# === Run App ===
+# === Error Handler ===
+def error_handler(update: object, context: CallbackContext):
+    try:
+        raise context.error
+    except Unauthorized:
+        logging.warning("Unauthorized: The bot lacks permission.")
+    except BadRequest as e:
+        logging.warning(f"BadRequest: {e}")
+    except Exception as e:
+        logging.error(f"Unhandled error: {e}")
+
+# === Main Application ===
 if __name__ == "__main__":
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.ping$"), ping))
-    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.on$"), turn_on))
-    app.add_handler(MessageHandler(filters.Regex(r"(?i)^\.off$"), turn_off))
-    app.add_handler(MessageHandler(filters.COMMAND, unknown_command))  # Handle unknown commands
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(MessageHandler(Filters.regex(r"^\.ping$"), ping))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    dp.add_error_handler(error_handler)
 
-    print("Mitsuri is online and full of pyaar!")
-    app.run_polling()
+    logging.info("Mitsuri is online and full of pyaar!")
+    updater.start_polling()
+    updater.idle()
