@@ -24,32 +24,41 @@ logging.basicConfig(
 # === Constants ===
 OWNER_ID = 7563434309
 GROUP_ID = -1002453669999
-MESSAGE_HISTORY = 5  # Number of previous messages to consider
+REQUEST_DELAY = 10
 
-# === Mitsuri Prompt ===
-def mitsuri_prompt(user_input, last_messages, from_owner=False, first_name=""):
-    context = "\n".join(last_messages[-MESSAGE_HISTORY:])  # Get the last 5 messages
-    special_note = (
-        f"sometimes You're talking to your owner Shashank Chauhan"
-        if from_owner else ""
-    )
-    return f"""
+# === Chat memory ===
+chat_history = {}  # {chat_id: [(role, message)]}
+
+# === Typing indicator ===
+def send_typing(update: Update, context: CallbackContext):
+    try:
+        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception as e:
+        logging.warning(f"Typing animation failed: {e}")
+
+# === Prompt Builder ===
+def build_prompt(history, user_input, first_name, from_owner):
+    system_instructions = f"""
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking name of users.
 Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 Talk and behave exactly like Mitsuri in which you will use hinglish language with japanese style talking.
 Keep the Conversation very small.
 Use cute emoji only in text (no stickers or images).
+{"You're talking to your owner Shashank Chauhan." if from_owner else ""}
+"""
+    prompt = system_instructions.strip() + "\n\n"
 
-{special_note}
+    for role, msg in history:
+        if role == "user":
+            prompt += f"Human ({first_name}): {msg}\n"
+        elif role == "bot":
+            prompt += f"Mitsuri: {msg}\n"
 
-{context}
-
-Human ({first_name}): {user_input}
-Mitsuri:"""
+    prompt += f"Human ({first_name}): {user_input}\nMitsuri:"
+    return prompt
 
 # === Retry-safe Gemini ===
-REQUEST_DELAY = 10
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
@@ -62,14 +71,9 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
             else:
                 return "Mujhe lagta hai wo thoda busy hai... baad mein try karna!"
 
-# === Safe reply with typing animation ===
+# === Safe reply ===
 def safe_reply_text(update: Update, text: str):
     try:
-        # Send typing action first
-        update.message.chat.send_action(action="typing")
-        # Simulate typing delay (you can adjust the time as needed)
-        time.sleep(2)  # Delay in seconds before sending the actual message
-        # Now send the response
         update.message.reply_text(text)
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to send message: {e}")
@@ -102,14 +106,17 @@ def ping(update: Update, context: CallbackContext):
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to edit message: {e}")
 
-# === Handle Messages ===
+# === Message Handler ===
 def handle_message(update: Update, context: CallbackContext):
     if not update.message:
         return
 
+    send_typing(update, context)
+
     user_input = update.message.text
     user_id = update.message.from_user.id
     first_name = update.message.from_user.first_name or ""
+    chat_id = update.message.chat_id
     chat_type = update.message.chat.type
     from_owner = user_id == OWNER_ID
 
@@ -117,6 +124,7 @@ def handle_message(update: Update, context: CallbackContext):
         safe_reply_text(update, "Mujhe yeh samjh nhi aaya kuch aur batao~")
         return
 
+    # Handle group-specific logic
     if chat_type in ["group", "supergroup"]:
         is_reply = (
             update.message.reply_to_message
@@ -141,19 +149,19 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # Keep track of the last N messages
-    if 'message_history' not in context.chat_data:
-        context.chat_data['message_history'] = []
-    
-    # Add the current message to the history
-    context.chat_data['message_history'].append(f"Human ({first_name}): {user_input}")
-    
-    # Limit the history to the last 5 messages
-    if len(context.chat_data['message_history']) > MESSAGE_HISTORY:
-        context.chat_data['message_history'].pop(0)
-
-    prompt = mitsuri_prompt(user_input, context.chat_data['message_history'], from_owner=from_owner, first_name=first_name)
+    # === History Handling ===
+    history = chat_history.get(chat_id, [])
+    prompt = build_prompt(history, user_input, first_name, from_owner)
     reply = generate_with_retry(prompt)
+
+    # Update memory
+    history.append(("user", user_input))
+    history.append(("bot", reply))
+    if len(history) > 10:
+        history = history[-10:]
+    chat_history[chat_id] = history
+
+    # Send reply
     safe_reply_text(update, reply)
 
 # === Error Handler ===
@@ -167,7 +175,7 @@ def error_handler(update: object, context: CallbackContext):
     except Exception as e:
         logging.error(f"Unhandled error: {e}")
 
-# === Main Application ===
+# === Main App ===
 if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
