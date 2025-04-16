@@ -22,4 +22,4 @@ RUN apt-get update && apt-get install -y tini
 EXPOSE 10000
 
 # Start both the dummy HTTP server and the bot (Mitsuri)
-CMD ["tini", "--", "sh", "-c", "python3 -m http.server 10000 & python3 mitsuri.py"]
+CMD ["tini", "--", "sh", "-c", "python3 -m http.server 10000 & python3 mitsuri_bot.py"]
