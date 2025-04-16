@@ -26,7 +26,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 
 # === Chat memory ===
-chat_history = {}  # {chat_id: [(role, message)]}
+chat_history = {}  # {chat_id: {user_id: [(role, message)]}}
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -34,6 +34,10 @@ def send_typing(update: Update, context: CallbackContext):
         context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception as e:
         logging.warning(f"Typing animation failed: {e}")
+
+# === Optional: Simulate delay based on message length ===
+def simulate_typing_delay(text):
+    return min(len(text) * 0.05, 2.5)
 
 # === Prompt Builder ===
 def build_prompt(history, user_input, chosen_name):
@@ -113,6 +117,7 @@ def handle_message(update: Update, context: CallbackContext):
     user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
+    user_id = user.id
 
     # Get name options
     first_name = user.first_name or ""
@@ -140,45 +145,32 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # === Detect if message is about Shashank ===
-    intent_prompt = f"""
-You're Mitsuri from Demon Slayer.
-
-Check if this message is asking *about Shashank* — like who he is, whether he's your owner/master, ya kuch bhi jisme curiosity ho about Shashank.
-
-Message: "{user_input.strip()}"
-
-Only reply "yes" or "no".
-"""
-    intent_reply = generate_with_retry(intent_prompt).lower().strip()
-
-    if "yes" in intent_reply:
-        gemini_response = generate_with_retry(
-            "Tell me about Shashank. Use Hinglish with Japanese kawaii style. Mention his username '@shashankxingh' naturally, sweetly, and shortly."
-        )
-        safe_reply_text(update, gemini_response)
-        return
-
-    # === Memory Handling ===
+    # === Memory Handling (per user per chat) ===
     if chat_id not in chat_history:
-        chat_history[chat_id] = []
+        chat_history[chat_id] = {}
 
-    history = chat_history[chat_id]
+    if user_id not in chat_history[chat_id]:
+        chat_history[chat_id][user_id] = []
+
+    history = chat_history[chat_id][user_id]
     prompt = build_prompt(history, user_input, chosen_name)
 
-    # Typing animation only if Mitsuri is going to reply
+    # Typing animation
     send_typing(update, context)
 
+    # Mitsuri's response
     reply = generate_with_retry(prompt)
 
-    # Update memory (store last 5 messages)
+    # Update memory
     history.append(("user", user_input))
     history.append(("bot", reply))
     if len(history) > 10:
         history = history[-10:]
-    chat_history[chat_id] = history
 
-    # Send reply
+    chat_history[chat_id][user_id] = history
+
+    # Simulate delay and reply
+    time.sleep(simulate_typing_delay(reply))
     safe_reply_text(update, reply)
 
 # === Error Handler ===
