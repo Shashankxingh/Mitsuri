@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import random
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
@@ -22,8 +23,6 @@ logging.basicConfig(
 )
 
 # === Constants ===
-OWNER_ID = 7563434309
-GROUP_ID = -1002453669999
 REQUEST_DELAY = 10
 
 # === Chat memory ===
@@ -37,7 +36,7 @@ def send_typing(update: Update, context: CallbackContext):
         logging.warning(f"Typing animation failed: {e}")
 
 # === Prompt Builder ===
-def build_prompt(history, user_input, user_id, from_owner):
+def build_prompt(history, user_input, chosen_name):
     system_instructions = f"""
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking the name of users.
@@ -45,17 +44,16 @@ Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 Talk and behave exactly like Mitsuri in which you will use hinglish language with japanese style talking.
 Keep the Conversation very small.
 Use cute emoji only in text (no stickers or images).
-{"You're talking to your owner Shashank-kun." if from_owner else ""}
 """
     prompt = system_instructions.strip() + "\n\n"
 
     for role, msg in history:
         if role == "user":
-            prompt += f"Human (@{user_id}): {msg}\n"
+            prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
             prompt += f"Mitsuri: {msg}\n"
 
-    prompt += f"Human (@{user_id}): {user_input}\nMitsuri:"
+    prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
 # === Retry-safe Gemini ===
@@ -112,13 +110,19 @@ def handle_message(update: Update, context: CallbackContext):
         return
 
     user_input = update.message.text
-    user_id = update.message.from_user.id  # Using user ID now
-    username = update.message.from_user.username  # Get the Telegram username
+    user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
-    from_owner = user_id == OWNER_ID
 
-    # Handle group-specific logic
+    # Get name options
+    first_name = user.first_name or ""
+    last_name = user.last_name or ""
+    username = f"@{user.username}" if user.username else ""
+    full_name = f"{first_name} {last_name}".strip()
+    name_options = [first_name, last_name, full_name, username]
+    chosen_name = random.choice([n for n in name_options if n])
+
+    # Group message filter
     if chat_type in ["group", "supergroup"]:
         is_reply = (
             update.message.reply_to_message
@@ -126,29 +130,41 @@ def handle_message(update: Update, context: CallbackContext):
             and update.message.reply_to_message.from_user.id == context.bot.id
         )
 
-        if not (
-            "mitsuri" in user_input.lower()
-            or "@shashankxingh" in user_input.lower()
-            or is_reply
-        ):
+        if not ("mitsuri" in user_input.lower() or is_reply):
             return
 
         if user_input.lower() == "mitsuri":
             safe_reply_text(update, "Hehe~ kisne bulaya mujhe?")
             return
-        elif "@shashankxingh" in user_input.lower():
-            safe_reply_text(update, "Shashank? Mere jivan sabse khaas insaan~")
-            return
         elif "are you a bot" in user_input.lower():
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
+
+    # === Detect if message is about Shashank ===
+    intent_prompt = f"""
+You're Mitsuri from Demon Slayer.
+
+Check if this message is asking *about Shashank* — like who he is, whether he's your owner/master, ya kuch bhi jisme curiosity ho about Shashank.
+
+Message: "{user_input.strip()}"
+
+Only reply "yes" or "no".
+"""
+    intent_reply = generate_with_retry(intent_prompt).lower().strip()
+
+    if "yes" in intent_reply:
+        gemini_response = generate_with_retry(
+            "Tell me about Shashank. Use Hinglish with Japanese kawaii style. Mention his username '@shashankxingh' naturally, sweetly, and shortly."
+        )
+        safe_reply_text(update, gemini_response)
+        return
 
     # === Memory Handling ===
     if chat_id not in chat_history:
         chat_history[chat_id] = []
 
     history = chat_history[chat_id]
-    prompt = build_prompt(history, user_input, username, from_owner)
+    prompt = build_prompt(history, user_input, chosen_name)
 
     # Typing animation only if Mitsuri is going to reply
     send_typing(update, context)
