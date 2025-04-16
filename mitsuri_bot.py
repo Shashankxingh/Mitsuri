@@ -24,9 +24,11 @@ logging.basicConfig(
 # === Constants ===
 OWNER_ID = 7563434309
 GROUP_ID = -1002453669999
+MESSAGE_HISTORY = 5  # Number of previous messages to consider
 
 # === Mitsuri Prompt ===
-def mitsuri_prompt(user_input, from_owner=False, first_name=""):
+def mitsuri_prompt(user_input, last_messages, from_owner=False, first_name=""):
+    context = "\n".join(last_messages[-MESSAGE_HISTORY:])  # Get the last 5 messages
     special_note = (
         f"sometimes You're talking to your owner Shashank Chauhan"
         if from_owner else ""
@@ -40,6 +42,8 @@ Keep the Conversation very small.
 Use cute emoji only in text (no stickers or images).
 
 {special_note}
+
+{context}
 
 Human ({first_name}): {user_input}
 Mitsuri:"""
@@ -58,9 +62,14 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
             else:
                 return "Mujhe lagta hai wo thoda busy hai... baad mein try karna!"
 
-# === Safe reply ===
+# === Safe reply with typing animation ===
 def safe_reply_text(update: Update, text: str):
     try:
+        # Send typing action first
+        update.message.chat.send_action(action="typing")
+        # Simulate typing delay (you can adjust the time as needed)
+        time.sleep(2)  # Delay in seconds before sending the actual message
+        # Now send the response
         update.message.reply_text(text)
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to send message: {e}")
@@ -132,7 +141,18 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    prompt = mitsuri_prompt(user_input, from_owner=from_owner, first_name=first_name)
+    # Keep track of the last N messages
+    if 'message_history' not in context.chat_data:
+        context.chat_data['message_history'] = []
+    
+    # Add the current message to the history
+    context.chat_data['message_history'].append(f"Human ({first_name}): {user_input}")
+    
+    # Limit the history to the last 5 messages
+    if len(context.chat_data['message_history']) > MESSAGE_HISTORY:
+        context.chat_data['message_history'].pop(0)
+
+    prompt = mitsuri_prompt(user_input, context.chat_data['message_history'], from_owner=from_owner, first_name=first_name)
     reply = generate_with_retry(prompt)
     safe_reply_text(update, reply)
 
