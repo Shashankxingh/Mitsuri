@@ -37,25 +37,25 @@ def send_typing(update: Update, context: CallbackContext):
         logging.warning(f"Typing animation failed: {e}")
 
 # === Prompt Builder ===
-def build_prompt(history, user_input, first_name, from_owner):
+def build_prompt(history, user_input, user_id, from_owner):
     system_instructions = f"""
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
-Talk while taking name of users.
+Talk while taking the name of users.
 Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 Talk and behave exactly like Mitsuri in which you will use hinglish language with japanese style talking.
 Keep the Conversation very small.
 Use cute emoji only in text (no stickers or images).
-{"You're talking to your owner Shashank Chauhan." if from_owner else ""}
+{"You're talking to your owner Shashank-kun." if from_owner else ""}
 """
     prompt = system_instructions.strip() + "\n\n"
 
     for role, msg in history:
         if role == "user":
-            prompt += f"Human ({first_name}): {msg}\n"
+            prompt += f"Human (@{user_id}): {msg}\n"
         elif role == "bot":
             prompt += f"Mitsuri: {msg}\n"
 
-    prompt += f"Human ({first_name}): {user_input}\nMitsuri:"
+    prompt += f"Human (@{user_id}): {user_input}\nMitsuri:"
     return prompt
 
 # === Retry-safe Gemini ===
@@ -111,18 +111,12 @@ def handle_message(update: Update, context: CallbackContext):
     if not update.message:
         return
 
-    send_typing(update, context)
-
     user_input = update.message.text
-    user_id = update.message.from_user.id
-    first_name = update.message.from_user.first_name or ""
+    user_id = update.message.from_user.id  # Using user ID now
+    username = update.message.from_user.username  # Get the Telegram username
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
     from_owner = user_id == OWNER_ID
-
-    if not user_input:
-        safe_reply_text(update, "Mujhe yeh samjh nhi aaya kuch aur batao~")
-        return
 
     # Handle group-specific logic
     if chat_type in ["group", "supergroup"]:
@@ -149,12 +143,19 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # === History Handling ===
-    history = chat_history.get(chat_id, [])
-    prompt = build_prompt(history, user_input, first_name, from_owner)
+    # === Memory Handling ===
+    if chat_id not in chat_history:
+        chat_history[chat_id] = []
+
+    history = chat_history[chat_id]
+    prompt = build_prompt(history, user_input, username, from_owner)
+
+    # Typing animation only if Mitsuri is going to reply
+    send_typing(update, context)
+
     reply = generate_with_retry(prompt)
 
-    # Update memory
+    # Update memory (store last 5 messages)
     history.append(("user", user_input))
     history.append(("bot", reply))
     if len(history) > 10:
