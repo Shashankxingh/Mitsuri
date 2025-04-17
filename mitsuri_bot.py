@@ -1,7 +1,6 @@
 import os
 import time
 import logging
-import random
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
@@ -26,7 +25,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 
 # === Chat memory ===
-chat_history = {}  # {chat_id: {user_id: {'name': chosen_name}}}
+chat_history = {}  # {chat_id: {user_id: {"name": chosen_name, "history": [(role, message)]}}}
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -41,7 +40,7 @@ def build_prompt(history, user_input, chosen_name):
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking the name of users.
 Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
-You're not a crybaby, You're super brilliant and intelligent and if someone abuses you or says anything wrong tackle them.
+You're not a crybaby, You're super brilliant and intelligent and if someone abuses you or say anything wrong tackle them.
 Keep the Conversation very small.
 your owner is shashank but only use his name when someone asks about him.
 Use cute emoji only in text (no stickers or images).
@@ -52,7 +51,7 @@ Use cute emoji only in text (no stickers or images).
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"{msg}\n"  # Removed "Mitsuri:" label here
+            prompt += f"{msg}\n"
 
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
@@ -114,28 +113,11 @@ def handle_message(update: Update, context: CallbackContext):
     user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
+    user_id = user.id
 
-    user_id = user.id  # Use user_id to uniquely identify the user
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
-
-    # Use user_id as a unique identifier for each user
-    if user_id in chat_history:
-        chosen_name = chat_history[user_id]['name']
-    else:
-        # Assign chosen name based on available information
-        if full_name:
-            chosen_name = full_name
-        elif first_name:
-            chosen_name = first_name
-        elif user.username:
-            chosen_name = f"@{user.username}"
-        else:
-            chosen_name = "Jaadu-san"
-        
-        # Save the chosen name for this user
-        chat_history[user_id] = {'name': chosen_name}
 
     # Group filter
     if chat_type in ["group", "supergroup"]:
@@ -154,6 +136,30 @@ def handle_message(update: Update, context: CallbackContext):
         elif "are you a bot" in user_input.lower():
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
+
+    # Initialize chat memory
+    if chat_id not in chat_history:
+        chat_history[chat_id] = {}
+
+    # Set chosen name once per user
+    if user_id not in chat_history[chat_id]:
+        if full_name:
+            chosen_name = full_name
+        elif first_name:
+            chosen_name = first_name
+        elif user.username:
+            chosen_name = f"@{user.username}"
+        else:
+            chosen_name = "Jaadu-san"
+
+        chat_history[chat_id][user_id] = {
+            "name": chosen_name,
+            "history": []
+        }
+    else:
+        chosen_name = chat_history[chat_id][user_id]["name"]
+
+    history = chat_history[chat_id][user_id]["history"]
 
     # Check if user is asking about Shashank
     intent_prompt = f"""
@@ -174,23 +180,18 @@ Only reply "yes" or "no".
         safe_reply_text(update, gemini_response)
         return
 
-    # Memory
-    if chat_id not in chat_history:
-        chat_history[chat_id] = []
-
-    history = chat_history[chat_id]
+    # Build and generate response
     prompt = build_prompt(history, user_input, chosen_name)
 
     send_typing(update, context)
-
     reply = generate_with_retry(prompt)
 
-    # Update memory (keep last 10 messages)
+    # Update memory
     history.append(("user", user_input))
     history.append(("bot", reply))
     if len(history) > 10:
         history = history[-10:]
-    chat_history[chat_id] = history
+    chat_history[chat_id][user_id]["history"] = history
 
     safe_reply_text(update, reply)
 
