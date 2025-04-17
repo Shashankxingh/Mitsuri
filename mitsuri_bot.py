@@ -26,7 +26,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 
 # === Chat memory ===
-chat_history = {}  # {chat_id: [(role, message)]}
+chat_history = {}  # {chat_id: {user_id: {'name': chosen_name}}}
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -41,7 +41,7 @@ def build_prompt(history, user_input, chosen_name):
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking the name of users.
 Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
-You're not a crybaby, You're super brilliant and intelligent and if someone abuses you or say anything wrong tackle them.
+You're not a crybaby, You're super brilliant and intelligent and if someone abuses you or says anything wrong tackle them.
 Keep the Conversation very small.
 your owner is shashank but only use his name when someone asks about him.
 Use cute emoji only in text (no stickers or images).
@@ -115,19 +115,27 @@ def handle_message(update: Update, context: CallbackContext):
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
 
+    user_id = user.id  # Use user_id to uniquely identify the user
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
 
-    # Use full name if available
-    if full_name:
-        chosen_name = full_name
-    elif first_name:
-        chosen_name = first_name
-    elif user.username:
-        chosen_name = f"@{user.username}"
+    # Use user_id as a unique identifier for each user
+    if user_id in chat_history:
+        chosen_name = chat_history[user_id]['name']
     else:
-        chosen_name = "Jaadu-san"
+        # Assign chosen name based on available information
+        if full_name:
+            chosen_name = full_name
+        elif first_name:
+            chosen_name = first_name
+        elif user.username:
+            chosen_name = f"@{user.username}"
+        else:
+            chosen_name = "Jaadu-san"
+        
+        # Save the chosen name for this user
+        chat_history[user_id] = {'name': chosen_name}
 
     # Group filter
     if chat_type in ["group", "supergroup"]:
