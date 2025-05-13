@@ -43,8 +43,7 @@ Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 You're cute, You're super brilliant and intelligent but not nerd and lastly use inappropriate language too.
 You're not a bot, you're a real girl.
 Keep the Conversation very small and respond in the language that user uses.
-your owner is shashank but only use his name when someone asks about him, his username is @shashankxingh(don't use username unless someone explicitly asks)
-Use cute emoji only in text(except 😊).
+If someone asks about Shashank, reply like you don't know who that is. Just say something like "Shashank? Hmm, naam suna toh hai... but I don't really know~".
 """
     prompt = system_instructions.strip() + "\n\n"
 
@@ -110,7 +109,7 @@ def handle_message(update: Update, context: CallbackContext):
     if not update.message:
         return
 
-    user_input = update.message.text
+    user_input = update.message.text.strip()
     user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
@@ -138,48 +137,29 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # Initialize chat memory
+    # Always use latest name
+    if full_name:
+        chosen_name = full_name
+    elif first_name:
+        chosen_name = first_name
+    elif user.username:
+        chosen_name = f"@{user.username}"
+    else:
+        chosen_name = "Jaadu-san"
+
+    # Initialize or update memory
     if chat_id not in chat_history:
         chat_history[chat_id] = {}
 
-    # Set chosen name once per user
     if user_id not in chat_history[chat_id]:
-        if full_name:
-            chosen_name = full_name
-        elif first_name:
-            chosen_name = first_name
-        elif user.username:
-            chosen_name = f"@{user.username}"
-        else:
-            chosen_name = "Jaadu-san"
-
         chat_history[chat_id][user_id] = {
             "name": chosen_name,
             "history": []
         }
     else:
-        chosen_name = chat_history[chat_id][user_id]["name"]
+        chat_history[chat_id][user_id]["name"] = chosen_name
 
     history = chat_history[chat_id][user_id]["history"]
-
-    # Check if user is asking about Shashank
-    intent_prompt = f"""
-You're Mitsuri from Demon Slayer.
-
-Check if this message is asking *about Shashank* — like who he is, whether he's your owner/master, ya kuch bhi jisme curiosity ho about Shashank.
-
-Message: "{user_input.strip()}"
-
-Only reply "yes" or "no".
-"""
-    intent_reply = generate_with_retry(intent_prompt).lower().strip()
-
-    if "yes" in intent_reply:
-        gemini_response = generate_with_retry(
-            "Tell me about Shashank. Use Hinglish with Japanese kawaii style. Mention his username '@shashankxingh' naturally, sweetly, and shortly."
-        )
-        safe_reply_text(update, gemini_response)
-        return
 
     # Build and generate response
     prompt = build_prompt(history, user_input, chosen_name)
@@ -190,9 +170,7 @@ Only reply "yes" or "no".
     # Update memory
     history.append(("user", user_input))
     history.append(("bot", reply))
-    if len(history) > 10:
-        history = history[-10:]
-    chat_history[chat_id][user_id]["history"] = history
+    chat_history[chat_id][user_id]["history"] = history[-10:]
 
     safe_reply_text(update, reply)
 
