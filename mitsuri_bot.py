@@ -1,7 +1,10 @@
 import os
 import time
 import logging
+import random
+import threading
 from dotenv import load_dotenv
+from pymongo import MongoClient
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
@@ -11,10 +14,16 @@ from telegram.error import Unauthorized, BadRequest
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
 
 # === Configure Gemini ===
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
+
+# === MongoDB Setup ===
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["MitsuriDB"]
+history_collection = db["chat_histories"]
 
 # === Logging Setup ===
 logging.basicConfig(
@@ -23,9 +32,27 @@ logging.basicConfig(
 
 # === Constants ===
 REQUEST_DELAY = 10
+AUTO_PING_GROUP_ID = -1001234567890  # <-- Replace with your actual group chat ID
+PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
+PING_INTERVAL = 3600  # seconds (1 hour)
 
-# === Chat memory ===
-chat_history = {}  # {chat_id: {user_id: {"name": chosen_name, "history": [(role, message)]}}}
+# === MongoDB Helpers ===
+def get_chat_document(chat_id, user_id):
+    return history_collection.find_one({"chat_id": chat_id, "user_id": user_id})
+
+def save_chat_history(chat_id, user_id, name, history):
+    history_collection.update_one(
+        {"chat_id": chat_id, "user_id": user_id},
+        {
+            "$set": {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "name": name,
+                "history": history[-10:]
+            }
+        },
+        upsert=True
+    )
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -56,18 +83,20 @@ Shashank is your owner.
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-# === Retry-safe Gemini ===
+# === Gemini API with retry ===
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
-            return response.text.strip() if response.text else "Aww, mujhe kuch samajh nahi aaya!"
+            if hasattr(response, 'text') and response.text:
+                return response.text.strip()
+            else:
+                return "Oops... kuch response nahi aaya!"
         except Exception as e:
             logging.error(f"Gemini API error: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-            else:
-                return "Mujhe lagta hai wo thoda busy hai... baad mein try karna!"
+    return "Mujhe lagta hai Gemini thoda busy hai... baad mein try karo!"
 
 # === Safe reply ===
 def safe_reply_text(update: Update, text: str):
@@ -76,11 +105,11 @@ def safe_reply_text(update: Update, text: str):
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to send message: {e}")
 
-# === /start ===
+# === /start command ===
 def start(update: Update, context: CallbackContext):
     safe_reply_text(update, "Hehe~ Mitsuri yaha hai! Bolo kya haal hai?")
 
-# === .ping ===
+# === .ping command ===
 def ping(update: Update, context: CallbackContext):
     user = update.effective_user
     first_name = user.first_name if user else "Someone"
@@ -104,7 +133,7 @@ def ping(update: Update, context: CallbackContext):
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to edit message: {e}")
 
-# === Message Handler ===
+# === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
     if not update.message:
         return
@@ -118,6 +147,7 @@ def handle_message(update: Update, context: CallbackContext):
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
+    chosen_name = full_name[:25] if full_name else (user.username or "Jaadu-san")
 
     # Group filter
     if chat_type in ["group", "supergroup"]:
@@ -137,29 +167,12 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # Always use latest name
-    if full_name:
-        chosen_name = full_name
-    elif first_name:
-        chosen_name = first_name
-    elif user.username:
-        chosen_name = f"@{user.username}"
+    # Load history from MongoDB
+    doc = get_chat_document(chat_id, user_id)
+    if doc:
+        history = doc.get("history", [])
     else:
-        chosen_name = "Jaadu-san"
-
-    # Initialize or update memory
-    if chat_id not in chat_history:
-        chat_history[chat_id] = {}
-
-    if user_id not in chat_history[chat_id]:
-        chat_history[chat_id][user_id] = {
-            "name": chosen_name,
-            "history": []
-        }
-    else:
-        chat_history[chat_id][user_id]["name"] = chosen_name
-
-    history = chat_history[chat_id][user_id]["history"]
+        history = []
 
     # Build and generate response
     prompt = build_prompt(history, user_input, chosen_name)
@@ -167,10 +180,10 @@ def handle_message(update: Update, context: CallbackContext):
     send_typing(update, context)
     reply = generate_with_retry(prompt)
 
-    # Update memory
+    # Update and save history
     history.append(("user", user_input))
     history.append(("bot", reply))
-    chat_history[chat_id][user_id]["history"] = history[-10:]
+    save_chat_history(chat_id, user_id, chosen_name, history)
 
     safe_reply_text(update, reply)
 
@@ -185,7 +198,19 @@ def error_handler(update: object, context: CallbackContext):
     except Exception as e:
         logging.error(f"Unhandled error: {e}")
 
-# === Main App ===
+# === Auto-ping Group ===
+def auto_ping(bot):
+    def send_ping():
+        while True:
+            try:
+                message = random.choice(PING_MESSAGES)
+                bot.send_message(chat_id=AUTO_PING_GROUP_ID, text=message)
+            except Exception as e:
+                logging.warning(f"Auto ping failed: {e}")
+            time.sleep(PING_INTERVAL)
+    threading.Thread(target=send_ping, daemon=True).start()
+
+# === Main ===
 if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -194,6 +219,8 @@ if __name__ == "__main__":
     dp.add_handler(MessageHandler(Filters.regex(r"^\.ping$"), ping))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
+
+    auto_ping(updater.bot)
 
     logging.info("Mitsuri is online and full of pyaar!")
     updater.start_polling()
