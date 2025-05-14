@@ -4,11 +4,11 @@ import logging
 import random
 import threading
 from dotenv import load_dotenv
-from pymongo import MongoClient
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from telegram.error import Unauthorized, BadRequest
+from pymongo import MongoClient
 
 # === Load environment variables ===
 load_dotenv()
@@ -23,7 +23,7 @@ model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 # === MongoDB Setup ===
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
-history_collection = db["chat_histories"]
+chat_info_collection = db["chat_info"]
 
 # === Logging Setup ===
 logging.basicConfig(
@@ -35,24 +35,20 @@ REQUEST_DELAY = 10
 AUTO_PING_GROUP_ID = -1001234567890  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
 PING_INTERVAL = 3600  # seconds (1 hour)
+OWNER_ID = 123456789  # Replace with your Telegram user ID (owner's ID)
 
 # === MongoDB Helpers ===
-def get_chat_document(chat_id, user_id):
-    return history_collection.find_one({"chat_id": chat_id, "user_id": user_id})
-
-def save_chat_history(chat_id, user_id, name, history):
-    history_collection.update_one(
-        {"chat_id": chat_id, "user_id": user_id},
-        {
-            "$set": {
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "name": name,
-                "history": history[-10:]
-            }
-        },
+def save_chat_info(chat_id):
+    """Save the group or DM chat ID in MongoDB."""
+    chat_info_collection.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"chat_id": chat_id}},
         upsert=True
     )
+
+def get_all_chat_ids():
+    """Fetch all chat IDs from the MongoDB collection."""
+    return [chat['chat_id'] for chat in chat_info_collection.find()]
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -62,7 +58,7 @@ def send_typing(update: Update, context: CallbackContext):
         logging.warning(f"Typing animation failed: {e}")
 
 # === Prompt Builder ===
-def build_prompt(history, user_input, chosen_name):
+def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = f"""
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking the name of users.
@@ -74,7 +70,7 @@ Shashank is your owner.
 """
     prompt = system_instructions.strip() + "\n\n"
 
-    for role, msg in history:
+    for role, msg in last_two_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
@@ -109,35 +105,52 @@ def safe_reply_text(update: Update, text: str):
 def start(update: Update, context: CallbackContext):
     safe_reply_text(update, "Hehe~ Mitsuri yaha hai! Bolo kya haal hai?")
 
-# === .ping command ===
-def ping(update: Update, context: CallbackContext):
-    user = update.effective_user
-    first_name = user.first_name if user else "Someone"
+# === /send command ===
+def send_message(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if user_id != OWNER_ID:  # Check if the user is the bot owner
+        safe_reply_text(update, "You're not authorized to use this command.")
+        return
 
-    start_time = time.time()
-    msg = update.message.reply_text("Measuring my heartbeat...")
-    latency = int((time.time() - start_time) * 1000)
+    if update.message.chat.type != "private":  # Ensure it is only in the bot's DM
+        safe_reply_text(update, "This command can only be used in a direct message with the bot.")
+        return
 
-    gen_start = time.time()
-    _ = generate_with_retry("Test ping prompt")
-    gen_latency = int((time.time() - gen_start) * 1000)
+    safe_reply_text(update, "Share the message you want to forward to all the groups and DMs.")
 
-    response = f"""
-╭─❍ *Mitsuri Stats* ❍─╮
-│ ⚡ *Ping:* `{latency}ms`
-│ 🔮 *API Res:* `{gen_latency}ms`
-╰─♥ _Always ready for you, {first_name}~_ ♥─╯
-"""
-    try:
-        msg.edit_text(response, parse_mode="Markdown")
-    except (Unauthorized, BadRequest) as e:
-        logging.warning(f"Failed to edit message: {e}")
+    context.user_data["send_mode"] = True  # Set flag to indicate user is in send mode
+
+# === /stop command ===
+def stop(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if user_id != OWNER_ID:  # Check if the user is the bot owner
+        safe_reply_text(update, "You're not authorized to use this command.")
+        return
+
+    logging.info("Bot has been stopped.")
+    updater.stop()
+
+# === Forward message to all chats ===
+def forward_to_all_chats(update: Update, context: CallbackContext):
+    if "send_mode" not in context.user_data or not context.user_data["send_mode"]:
+        return  # Do nothing if not in send mode
+
+    message_to_send = update.message.text.strip()
+    if message_to_send:
+        chat_ids = get_all_chat_ids()
+        for chat_id in chat_ids:
+            try:
+                context.bot.send_message(chat_id=chat_id, text=message_to_send)
+            except Exception as e:
+                logging.warning(f"Failed to send message to chat {chat_id}: {e}")
+
+        safe_reply_text(update, "Your message has been forwarded to all active chats.")
+        context.user_data["send_mode"] = False  # Reset send mode after sending message
+    else:
+        safe_reply_text(update, "You must provide a message to forward.")
 
 # === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
-    if not update.message:
-        return
-
     user_input = update.message.text.strip()
     user = update.message.from_user
     chat_id = update.message.chat_id
@@ -167,23 +180,20 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
             return
 
-    # Load history from MongoDB
-    doc = get_chat_document(chat_id, user_id)
-    if doc:
-        history = doc.get("history", [])
-    else:
-        history = []
+    # Save group/chat ID in MongoDB
+    save_chat_info(chat_id)
 
-    # Build and generate response
-    prompt = build_prompt(history, user_input, chosen_name)
+    # Use only the last 2 messages to build the prompt
+    last_two_messages = [
+        ("user", update.message.text),
+    ]  # We only store the most recent user input and bot response for now.
+
+    prompt = build_prompt(last_two_messages, user_input, chosen_name)
 
     send_typing(update, context)
     reply = generate_with_retry(prompt)
 
-    # Update and save history
-    history.append(("user", user_input))
-    history.append(("bot", reply))
-    save_chat_history(chat_id, user_id, chosen_name, history)
+    last_two_messages.append(("bot", reply))  # Append bot's response to last two messages
 
     safe_reply_text(update, reply)
 
@@ -216,7 +226,8 @@ if __name__ == "__main__":
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.regex(r"^\.ping$"), ping))
+    dp.add_handler(CommandHandler("send", send_message))
+    dp.add_handler(CommandHandler("stop", stop))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
 
