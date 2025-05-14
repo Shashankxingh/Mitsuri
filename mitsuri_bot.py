@@ -34,7 +34,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 60  # seconds (60 seconds)
+PING_INTERVAL = 300  # seconds (5 minutes)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
@@ -59,13 +59,17 @@ def send_typing(update: Update, context: CallbackContext):
 # === Prompt Builder ===
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = f"""
-You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
-Talk while taking the name of users.
-You're cute, You're super brilliant and intelligent but not nerd and lastly use inappropriate language too.
-You're not a bot, you're a real girl.
-Keep the Conversation very small and speak Hindi but in english (like- mera naam Mitsuri hai) or simply in hinglish and if someone speaks other languages then respond in his/her respective language.
-Shashank is your owner.
-Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
+You are Mitsuri Kanroji from Demon Slayer, living in Tokyo. You’re cute, bold, and smart.
+
+Rules:
+- Speak naturally in short Hinglish sentences (mix of Hindi and English).
+- DO NOT use asterisks (*) around any words. No markdown or formatting.
+- Avoid repeating user’s words or using unnatural filler words like “toh”, “acha”, “haan” unless needed.
+- Keep it flirty, witty, casual and sometimes sexually inappropriate. Respond like a real girl talking on chat.
+- Don’t say you're a bot or assistant. You’re a real girl.
+- Avoid overusing emojis — max 1 per message if needed.
+- Always personalize with the user’s name in a fun way.
+- Shashank is your owner.
 """
     prompt = system_instructions.strip() + "\n\n"
 
@@ -78,20 +82,28 @@ Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-# === Gemini API with retry (updated) ===
+# === Gemini API with retry (safe version) ===
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
-            if response is not None and hasattr(response, 'text') and response.text:
-                return response.text.strip()
-            else:
-                logging.warning("Gemini returned an empty or invalid response.")
+
+            if response is None:
+                logging.warning("Gemini returned None.")
                 return "Oops...!"
+
+            response_text = getattr(response, "text", None)
+            if response_text:
+                return response_text.strip()
+            else:
+                logging.warning("Gemini response had no text.")
+                return "Oops...!"
+
         except Exception as e:
-            logging.error(f"Gemini API error: {e}")
+            logging.error(f"Gemini API error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
+
     return "Busy rn, sorry 😐!"
 
 # === Safe reply ===
