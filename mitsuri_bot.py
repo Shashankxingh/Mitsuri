@@ -34,7 +34,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 300  # seconds (10 mins)
+PING_INTERVAL = 300  # seconds (5 minutes)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
@@ -78,14 +78,15 @@ Shashank is your owner.
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-# === Gemini API with retry ===
+# === Gemini API with retry (updated) ===
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
-            if hasattr(response, 'text') and response.text:
+            if response is not None and hasattr(response, 'text') and response.text:
                 return response.text.strip()
             else:
+                logging.warning("Gemini returned an empty or invalid response.")
                 return "Oops...!"
         except Exception as e:
             logging.error(f"Gemini API error: {e}")
@@ -115,7 +116,7 @@ def handle_message(update: Update, context: CallbackContext):
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
-    chosen_name = full_name[:25] if full_name else (user.username)
+    chosen_name = full_name[:25] if full_name else (user.username or "User")
 
     # Group filter
     if chat_type in ["group", "supergroup"]:
@@ -131,21 +132,21 @@ def handle_message(update: Update, context: CallbackContext):
         if user_input.lower() == "mitsuri":
             safe_reply_text(update, "Hehe~🤭, Hi cutie pie🫣?")
             return
-        
+
     # Save group/chat ID in MongoDB
     save_chat_info(chat_id)
 
-    # Use only the last 2 messages to build the prompt
+    # Use only the last message to build the prompt
     last_two_messages = [
         ("user", update.message.text),
-    ]  # We only store the most recent user input and bot response for now.
+    ]
 
     prompt = build_prompt(last_two_messages, user_input, chosen_name)
 
     send_typing(update, context)
     reply = generate_with_retry(prompt)
 
-    last_two_messages.append(("bot", reply))  # Append bot's response to last two messages
+    last_two_messages.append(("bot", reply))
 
     safe_reply_text(update, reply)
 
