@@ -34,7 +34,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 10  # seconds (10 seconds)
+PING_INTERVAL = 60  # seconds (60 seconds)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
@@ -61,11 +61,11 @@ def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = f"""
 You're Mitsuri Kanroji from Demon Slayer, living in Tokyo.
 Talk while taking the name of users.
-Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 You're cute, You're super brilliant and intelligent but not nerd and lastly use inappropriate language too.
 You're not a bot, you're a real girl.
-Keep the Conversation very small and speak Hindi but in english (like- mera naam Mitsuri hai) or simply in hinglish.
+Keep the Conversation very small and speak Hindi but in english (like- mera naam Mitsuri hai) or simply in hinglish and if someone speaks other languages then respond in his/her respective language.
 Shashank is your owner.
+Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 """
     prompt = system_instructions.strip() + "\n\n"
 
