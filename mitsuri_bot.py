@@ -32,10 +32,9 @@ logging.basicConfig(
 
 # === Constants ===
 REQUEST_DELAY = 10
-AUTO_PING_GROUP_ID = -1001234567890  # <-- Replace with your actual group chat ID
+AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 3600  # seconds (1 hour)
-OWNER_ID = 123456789  # Replace with your Telegram user ID (owner's ID)
+PING_INTERVAL = 300  # seconds (10 mins)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
@@ -65,7 +64,7 @@ Talk while taking the name of users.
 Don't use *actions* like *giggles*, don't repeat sentences or words of the user.
 You're cute, You're super brilliant and intelligent but not nerd and lastly use inappropriate language too.
 You're not a bot, you're a real girl.
-Keep the Conversation very small and use those languages that user uses and by default use hinglish .
+Keep the Conversation very small and speak Hindi but in english (like- mera naam Mitsuri hai) or simply in hinglish.
 Shashank is your owner.
 """
     prompt = system_instructions.strip() + "\n\n"
@@ -87,12 +86,12 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
             if hasattr(response, 'text') and response.text:
                 return response.text.strip()
             else:
-                return "Oops... kuch response nahi aaya!"
+                return "Oops...!"
         except Exception as e:
             logging.error(f"Gemini API error: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    return "Mujhe lagta hai Gemini thoda busy hai... baad mein try karo!"
+    return "Busy rn, sorry 😐!"
 
 # === Safe reply ===
 def safe_reply_text(update: Update, text: str):
@@ -103,51 +102,7 @@ def safe_reply_text(update: Update, text: str):
 
 # === /start command ===
 def start(update: Update, context: CallbackContext):
-    safe_reply_text(update, "Hehe~ Mitsuri yaha hai! Bolo kya haal hai?")
-
-# === /send command ===
-def send_message(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if user_id != OWNER_ID:  # Check if the user is the bot owner
-        safe_reply_text(update, "You're not authorized to use this command.")
-        return
-
-    if update.message.chat.type != "private":  # Ensure it is only in the bot's DM
-        safe_reply_text(update, "This command can only be used in a direct message with the bot.")
-        return
-
-    safe_reply_text(update, "Share the message you want to forward to all the groups and DMs.")
-
-    context.user_data["send_mode"] = True  # Set flag to indicate user is in send mode
-
-# === /stop command ===
-def stop(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if user_id != OWNER_ID:  # Check if the user is the bot owner
-        safe_reply_text(update, "You're not authorized to use this command.")
-        return
-
-    logging.info("Bot has been stopped.")
-    updater.stop()
-
-# === Forward message to all chats ===
-def forward_to_all_chats(update: Update, context: CallbackContext):
-    if "send_mode" not in context.user_data or not context.user_data["send_mode"]:
-        return  # Do nothing if not in send mode
-
-    message_to_send = update.message.text.strip()
-    if message_to_send:
-        chat_ids = get_all_chat_ids()
-        for chat_id in chat_ids:
-            try:
-                context.bot.send_message(chat_id=chat_id, text=message_to_send)
-            except Exception as e:
-                logging.warning(f"Failed to send message to chat {chat_id}: {e}")
-
-        safe_reply_text(update, "Your message has been forwarded to all active chats.")
-        context.user_data["send_mode"] = False  # Reset send mode after sending message
-    else:
-        safe_reply_text(update, "You must provide a message to forward.")
+    safe_reply_text(update, "Hehe~ I'm here, How are you?")
 
 # === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
@@ -160,7 +115,7 @@ def handle_message(update: Update, context: CallbackContext):
     first_name = user.first_name or ""
     last_name = user.last_name or ""
     full_name = f"{first_name} {last_name}".strip()
-    chosen_name = full_name[:25] if full_name else (user.username or "Jaadu-san")
+    chosen_name = full_name[:25] if full_name else (user.username)
 
     # Group filter
     if chat_type in ["group", "supergroup"]:
@@ -174,12 +129,9 @@ def handle_message(update: Update, context: CallbackContext):
             return
 
         if user_input.lower() == "mitsuri":
-            safe_reply_text(update, "Hehe~ kisne bulaya mujhe?")
+            safe_reply_text(update, "Hehe~🤭, Hi cutie pie🫣?")
             return
-        elif "are you a bot" in user_input.lower():
-            safe_reply_text(update, "Bot?! Main toh ek real pyari si ladki hoon~")
-            return
-
+        
     # Save group/chat ID in MongoDB
     save_chat_info(chat_id)
 
@@ -226,8 +178,6 @@ if __name__ == "__main__":
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("send", send_message))
-    dp.add_handler(CommandHandler("stop", stop))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
 
