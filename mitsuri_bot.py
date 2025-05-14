@@ -34,7 +34,7 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
 PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 300  # seconds (5 minutes)
+PING_INTERVAL = 10  # seconds (10 seconds)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
