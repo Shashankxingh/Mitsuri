@@ -1,8 +1,6 @@
 import os
 import time
 import logging
-import random
-import threading
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
@@ -32,9 +30,6 @@ logging.basicConfig(
 
 # === Constants ===
 REQUEST_DELAY = 10
-AUTO_PING_GROUP_ID = -1002336117431  # <-- Replace with your actual group chat ID
-PING_MESSAGES = ["Hi", "Hello", "Hello guys", "Kya haal hai sabke?", "Wakey wakey~"]
-PING_INTERVAL = 300  # seconds (5 minutes)
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
@@ -117,6 +112,42 @@ def safe_reply_text(update: Update, text: str):
 def start(update: Update, context: CallbackContext):
     safe_reply_text(update, "Hehe~ I'm here, How are you?")
 
+# === /ping command (stylish) ===
+def ping(update: Update, context: CallbackContext):
+    user = update.message.from_user
+    name = user.first_name or user.username or "Cutie"
+
+    # Step 1: Send heartbeat message first
+    heartbeat_msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
+
+    try:
+        start_time = time.time()
+
+        # Lightweight Gemini ping
+        prompt = "Just say pong!"
+        response = model.generate_content(prompt)
+
+        latency = round((time.time() - start_time) * 1000)  # in ms
+        reply_text = (
+            f"╭───[ 🩷 *Mitsuri Ping Report* ]───\n"
+            f"├ Hello *{name}*, senpai~\n"
+            f"├ Gemini says: *{response.text.strip()}*\n"
+            f"╰⏱️ Ping: *{latency} ms*\n\n"
+            f"_Hehe~ heartbeat stable, ready to flirt anytime_ 💋"
+        )
+
+        # Step 2: Edit the heartbeat message to show result
+        context.bot.edit_message_text(
+            chat_id=heartbeat_msg.chat_id,
+            message_id=heartbeat_msg.message_id,
+            text=reply_text,
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logging.error(f"/ping error: {e}")
+        heartbeat_msg.edit_text("Oops~ I fainted while measuring... Try again later, okay? 😵‍💫")
+
 # === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
     user_input = update.message.text.strip()
@@ -173,28 +204,15 @@ def error_handler(update: object, context: CallbackContext):
     except Exception as e:
         logging.error(f"Unhandled error: {e}")
 
-# === Auto-ping Group ===
-def auto_ping(bot):
-    def send_ping():
-        while True:
-            try:
-                message = random.choice(PING_MESSAGES)
-                bot.send_message(chat_id=AUTO_PING_GROUP_ID, text=message)
-            except Exception as e:
-                logging.warning(f"Auto ping failed: {e}")
-            time.sleep(PING_INTERVAL)
-    threading.Thread(target=send_ping, daemon=True).start()
-
 # === Main ===
 if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_error_handler(error_handler)
-
-    auto_ping(updater.bot)
 
     logging.info("Mitsuri is online and full of pyaar!")
     updater.start_polling()
