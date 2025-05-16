@@ -149,20 +149,22 @@ def ping(update: Update, context: CallbackContext):
         uptime_seconds = time.time() - BOT_START_TIME
         uptime_str = format_uptime(uptime_seconds)
 
+        gemini_reply = response.text.strip().replace("<", "&lt;").replace(">", "&gt;")
+
         reply_text = (
-            f"╭───[ 🩷 *Mitsuri Ping Report* ]───\n"
-            f"├ Hello *{name}*, senpai~\n"
-            f"├ THE_JellyBeans: *{response.text.strip()}*\n"
-            f"├ API Latency: *{api_latency} ms*\n"
-            f"├ Bot Uptime: *{uptime_str}*\n"
-            f"╰⏱️ Ping stable, ready to flirt anytime "
+            f"╭───[ 🩷 <b>Mitsuri Ping Report</b> ]───\n"
+            f"├ Hello <b>{name}</b>, senpai~\n"
+            f"├ THE_JellyBeans: <b>{gemini_reply}</b>\n"
+            f"├ API Latency: <b>{api_latency} ms</b>\n"
+            f"├ Bot Uptime: <b>{uptime_str}</b>\n"
+            f"╰⏱️ Ping stable, ready to flirt anytime"
         )
 
         context.bot.edit_message_text(
             chat_id=heartbeat_msg.chat_id,
             message_id=heartbeat_msg.message_id,
             text=reply_text,
-            parse_mode="Markdown",
+            parse_mode="HTML"
         )
 
     except Exception as e:
