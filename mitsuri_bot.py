@@ -1,10 +1,18 @@
 import os
 import time
+import datetime
 import logging
 from dotenv import load_dotenv
 import google.generativeai as genai
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, ChatMemberUpdated, ChatMember
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    CallbackContext,
+    ChatMemberHandler,
+)
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
 
@@ -13,6 +21,10 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+
+# === Owner and special group config ===
+OWNER_ID = 7563434309  # Replace with your Telegram user ID
+SPECIAL_GROUP_ID = -1002336117431  # Replace with your special group chat ID
 
 # === Configure Gemini ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -30,17 +42,18 @@ logging.basicConfig(
 
 # === Constants ===
 REQUEST_DELAY = 10
+BOT_START_TIME = time.time()
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
     chat_info_collection.update_one(
         {"chat_id": chat_id},
         {"$set": {"chat_id": chat_id}},
-        upsert=True
+        upsert=True,
     )
 
 def get_all_chat_ids():
-    return [chat['chat_id'] for chat in chat_info_collection.find()]
+    return [chat["chat_id"] for chat in chat_info_collection.find()]
 
 # === Typing indicator ===
 def send_typing(update: Update, context: CallbackContext):
@@ -106,13 +119,17 @@ def safe_reply_text(update: Update, text: str):
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to send message: {e}")
 
+# === Helper: format uptime nicely ===
+def format_uptime(seconds):
+    return str(datetime.timedelta(seconds=int(seconds)))
+
 # === /start command ===
 def start(update: Update, context: CallbackContext):
     if not update.message:
         return
     safe_reply_text(update, "Hehe~ I'm here, How are you?")
 
-# === /ping command (stylish) ===
+# === /ping command (stylish, with uptime and Gemini response) ===
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
@@ -123,30 +140,102 @@ def ping(update: Update, context: CallbackContext):
     heartbeat_msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
 
     try:
-        start_time = time.time()
+        start_api_time = time.time()
 
         prompt = "Just say pong!"
         response = model.generate_content(prompt)
 
-        latency = round((time.time() - start_time) * 1000)
+        api_latency = round((time.time() - start_api_time) * 1000)
+        uptime_seconds = time.time() - BOT_START_TIME
+        uptime_str = format_uptime(uptime_seconds)
+
         reply_text = (
             f"╭───[ 🩷 *Mitsuri Ping Report* ]───\n"
             f"├ Hello *{name}*, senpai~\n"
-            f"├ Gemini says: *{response.text.strip()}*\n"
-            f"╰⏱️ Ping: *{latency} ms*\n\n"
-            f"_Hehe~ heartbeat stable, ready to flirt anytime_ 💋"
+            f"├ THE_JellyBeans: *{response.text.strip()}*\n"
+            f"├ API Latency: *{api_latency} ms*\n"
+            f"├ Bot Uptime: *{uptime_str}*\n"
+            f"╰⏱️ Ping stable, ready to flirt anytime "
         )
 
         context.bot.edit_message_text(
             chat_id=heartbeat_msg.chat_id,
             message_id=heartbeat_msg.message_id,
             text=reply_text,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
 
     except Exception as e:
         logging.error(f"/ping error: {e}")
         heartbeat_msg.edit_text("Oops~ I fainted while measuring... Try again later, okay? 😵‍💫")
+
+# === /show command - only OWNER_ID in SPECIAL_GROUP_ID ===
+def show_chats(update: Update, context: CallbackContext):
+    if not update.message:
+        return
+
+    user_id = update.message.from_user.id
+    chat_id = update.message.chat_id
+
+    # Only allow OWNER_ID to use this command
+    if user_id != OWNER_ID:
+        safe_reply_text(update, "Sorry, you are not allowed to use this command.")
+        return
+
+    # Only respond if command sent from the special group
+    if chat_id != SPECIAL_GROUP_ID:
+        return
+
+    chat_ids = get_all_chat_ids()
+
+    if not chat_ids:
+        safe_reply_text(update, "No chats saved in the database yet.")
+        return
+
+    msg_lines = []
+    for cid in chat_ids:
+        if cid < 0:  # negative IDs = groups/supergroups/channels
+            line = f"Group ID: <code>{cid}</code>"
+        else:
+            line = f"User DM ID: <code>{cid}</code>"
+        msg_lines.append(line)
+
+    text = "Saved chats:\n" + "\n".join(msg_lines)
+
+    try:
+        context.bot.send_message(
+            chat_id=SPECIAL_GROUP_ID,
+            text=text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"/show command error: {e}")
+
+# === ChatMember update handler to track bot added/removed from groups ===
+def track_bot_added_removed(update: Update, context: CallbackContext):
+    chat_member_update: ChatMemberUpdated = update.chat_member
+    old_status = chat_member_update.old_chat_member.status
+    new_status = chat_member_update.new_chat_member.status
+
+    # Only process if the update concerns the bot
+    if chat_member_update.new_chat_member.user.id != context.bot.id:
+        return
+
+    user_who_changed = chat_member_update.from_user
+    chat = chat_member_update.chat
+
+    user_mention = f"<a href='tg://user?id={user_who_changed.id}'>{user_who_changed.first_name}</a>"
+    chat_title = chat.title or "this chat"
+
+    # Bot was added
+    if old_status in ["left", "kicked"] and new_status in ["member", "administrator"]:
+        msg = f"{user_mention} added me to <b>{chat_title}</b>."
+        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
+
+    # Bot was removed
+    elif old_status in ["member", "administrator"] and new_status in ["left", "kicked"]:
+        msg = f"{user_mention} removed me from <b>{chat_title}</b>."
+        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
 
 # === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
@@ -213,9 +302,6 @@ if __name__ == "__main__":
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
+    dp.add_handler(CommandHandler("show", show_chats))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dp.add_error_handler(error_handler)
-
-    logging.info("Mitsuri is online and full of pyaar!")
-    updater.start_polling()
-    updater.idle()
+    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.M
