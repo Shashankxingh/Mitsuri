@@ -33,7 +33,6 @@ REQUEST_DELAY = 10
 
 # === MongoDB Helpers ===
 def save_chat_info(chat_id):
-    """Save the group or DM chat ID in MongoDB."""
     chat_info_collection.update_one(
         {"chat_id": chat_id},
         {"$set": {"chat_id": chat_id}},
@@ -41,7 +40,6 @@ def save_chat_info(chat_id):
     )
 
 def get_all_chat_ids():
-    """Fetch all chat IDs from the MongoDB collection."""
     return [chat['chat_id'] for chat in chat_info_collection.find()]
 
 # === Typing indicator ===
@@ -110,24 +108,27 @@ def safe_reply_text(update: Update, text: str):
 
 # === /start command ===
 def start(update: Update, context: CallbackContext):
+    if not update.message:
+        return
     safe_reply_text(update, "Hehe~ I'm here, How are you?")
 
 # === /ping command (stylish) ===
 def ping(update: Update, context: CallbackContext):
+    if not update.message:
+        return
+
     user = update.message.from_user
     name = user.first_name or user.username or "Cutie"
 
-    # Step 1: Send heartbeat message first
     heartbeat_msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
 
     try:
         start_time = time.time()
 
-        # Lightweight Gemini ping
         prompt = "Just say pong!"
         response = model.generate_content(prompt)
 
-        latency = round((time.time() - start_time) * 1000)  # in ms
+        latency = round((time.time() - start_time) * 1000)
         reply_text = (
             f"╭───[ 🩷 *Mitsuri Ping Report* ]───\n"
             f"├ Hello *{name}*, senpai~\n"
@@ -136,7 +137,6 @@ def ping(update: Update, context: CallbackContext):
             f"_Hehe~ heartbeat stable, ready to flirt anytime_ 💋"
         )
 
-        # Step 2: Edit the heartbeat message to show result
         context.bot.edit_message_text(
             chat_id=heartbeat_msg.chat_id,
             message_id=heartbeat_msg.message_id,
@@ -150,6 +150,9 @@ def ping(update: Update, context: CallbackContext):
 
 # === Message handler ===
 def handle_message(update: Update, context: CallbackContext):
+    if not update.message or not update.message.text:
+        return
+
     user_input = update.message.text.strip()
     user = update.message.from_user
     chat_id = update.message.chat_id
@@ -161,7 +164,6 @@ def handle_message(update: Update, context: CallbackContext):
     full_name = f"{first_name} {last_name}".strip()
     chosen_name = full_name[:25] if full_name else (user.username or "User")
 
-    # Group filter
     if chat_type in ["group", "supergroup"]:
         is_reply = (
             update.message.reply_to_message
@@ -176,10 +178,8 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Hehe~🤭, Hi cutie pie🫣?")
             return
 
-    # Save group/chat ID in MongoDB
     save_chat_info(chat_id)
 
-    # Use only the last message to build the prompt
     last_two_messages = [
         ("user", update.message.text),
     ]
@@ -195,6 +195,8 @@ def handle_message(update: Update, context: CallbackContext):
 
 # === Error Handler ===
 def error_handler(update: object, context: CallbackContext):
+    logging.error(f"Update: {update}")
+    logging.error(f"Context error: {context.error}")
     try:
         raise context.error
     except Unauthorized:
