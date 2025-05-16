@@ -4,7 +4,7 @@ import datetime
 import logging
 from dotenv import load_dotenv
 import google.generativeai as genai
-from telegram import Update, ChatMemberUpdated, ChatMember
+from telegram import Update, ChatMemberUpdated
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -304,4 +304,9 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("show", show_chats))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.M
+    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    dp.add_error_handler(error_handler)
+
+    updater.start_polling()
+    updater.idle()
