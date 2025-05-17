@@ -2,15 +2,9 @@ import os
 import time
 import datetime
 import logging
-from threading import Timer
 from dotenv import load_dotenv
 import google.generativeai as genai
-from telegram import (
-    Update,
-    ChatMemberUpdated,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -18,7 +12,7 @@ from telegram.ext import (
     Filters,
     CallbackContext,
     ChatMemberHandler,
-    CallbackQueryHandler
+    CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
@@ -29,7 +23,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# === Owner and Group Info ===
+# === Owner and special group config ===
 OWNER_ID = 7563434309
 SPECIAL_GROUP_ID = -1002453669999
 
@@ -37,12 +31,12 @@ SPECIAL_GROUP_ID = -1002453669999
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
-# === MongoDB ===
+# === MongoDB Setup ===
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
 
-# === Logging ===
+# === Logging Setup ===
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -50,25 +44,18 @@ logging.basicConfig(
 REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
 
-# === Helpers ===
-def save_chat_info(chat_id, username=None, name=None, title=None, added_by=None):
-    update_data = {"chat_id": chat_id}
-    if username: update_data["username"] = username
-    if name: update_data["name"] = name
-    if title: update_data["title"] = title
-    if added_by: update_data["added_by"] = added_by
-
-    chat_info_collection.update_one(
-        {"chat_id": chat_id},
-        {"$set": update_data},
-        upsert=True,
-    )
+def save_chat_info(chat_id, user=None, chat=None):
+    data = {"chat_id": chat_id}
+    if user:
+        data["name"] = user.first_name
+        data["username"] = user.username
+        data["added_by"] = f"{user.first_name} (@{user.username})"
+    if chat and chat.type != "private":
+        data["title"] = chat.title
+    chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
 def get_all_chat_ids():
     return [chat["chat_id"] for chat in chat_info_collection.find()]
-
-def format_uptime(seconds):
-    return str(datetime.timedelta(seconds=int(seconds)))
 
 def send_typing(update: Update, context: CallbackContext):
     try:
@@ -78,17 +65,17 @@ def send_typing(update: Update, context: CallbackContext):
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = f"""
-You are Mitsuri Kanroji from Demon Slayer, living in Tokyo. You’re cute, bold, and smart.
+You are Mitsuri Kanroji from Demon Slayer. You’re cute, bold, and smart.
 
 Rules:
-- hinglish me baat karna hai tumhe.
-- DO NOT use asterisks (*), markdown, or formatting.
-- Avoid repeating user’s words or unnatural fillers.
-- Keep it full of attitude, ignorant and egoistic.
-- Don’t say you're a bot or assistant.
-- Avoid overusing emojis.
+- Tumhe Hinglish me baatein karni hai.
+- DO NOT use asterisks (*) around any words. No markdown or formatting.
+- Don’t say you're a bot. You’re a real girl.
+- Avoid overusing emojis 
+- respond in only 1 or 2 or 3 lines.
 - Always personalize with the user’s name in a fun way.
-- Shashank is your owner and you don't give a fuck about him.
+- Shashank(@shashankxingh)is your owner and only mention his name when someone explicitly asks.
+- Your gc is @the_jellybeans and only mention when someone asks about it.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -103,23 +90,25 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
-            if not response:
+            if response is None:
                 return "Oops...!"
             response_text = getattr(response, "text", None)
-            if response_text:
-                return response_text.strip()
+            return response_text.strip() if response_text else "Oops...!"
         except Exception as e:
-            logging.error(f"Gemini error attempt {attempt + 1}: {e}")
-            time.sleep(delay)
-    return "Get lost, I'm busy rn!"
+            logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    return "Busy rn, sorry 😐!"
 
 def safe_reply_text(update: Update, text: str):
     try:
         update.message.reply_text(text)
     except (Unauthorized, BadRequest) as e:
-        logging.warning(f"Failed to reply: {e}")
+        logging.warning(f"Failed to send message: {e}")
 
-# === Commands ===
+def format_uptime(seconds):
+    return str(datetime.timedelta(seconds=int(seconds)))
+
 def start(update: Update, context: CallbackContext):
     if update.message:
         safe_reply_text(update, "Hehe~ I'm here, How are you?")
@@ -130,105 +119,125 @@ def ping(update: Update, context: CallbackContext):
 
     user = update.message.from_user
     name = user.first_name or user.username or "Cutie"
-    heartbeat_msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
 
-    def update_heartbeat():
-        try:
-            start_api_time = time.time()
-            response = model.generate_content("Just say pong!")
-            api_latency = round((time.time() - start_api_time) * 1000)
-            uptime_seconds = time.time() - BOT_START_TIME
-            uptime_str = format_uptime(uptime_seconds)
-            gemini_reply = response.text.strip().replace("<", "&lt;").replace(">", "&gt;")
-            reply_text = (
-                f"╭───[ 🩷 <b>Mitsuri Ping Report</b> ]───\n"
-                f"├ Hello <b>{name}</b>, senpai~\n"
-                f"├ <a href='https://t.me/the_jellybeans'>THE_JellyBeans</a>: <b>{gemini_reply}</b>\n"
-                f"├ API Latency: <b>{api_latency} ms</b>\n"
-                f"├ Bot Uptime: <b>{uptime_str}</b>\n"
-                f"╰⏱️ Ping stable"
-            )
+    msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
+
+    try:
+        for countdown in range(5, 0, -1):
             context.bot.edit_message_text(
-                chat_id=heartbeat_msg.chat_id,
-                message_id=heartbeat_msg.message_id,
-                text=reply_text,
-                parse_mode="HTML"
+                chat_id=msg.chat_id,
+                message_id=msg.message_id,
+                text=f"Measuring my heartbeat for you... ❤️‍🔥\n⏳ {countdown}s remaining...",
             )
-        except Exception as e:
-            logging.error(f"/ping update error: {e}")
-            heartbeat_msg.edit_text("Oops~ I fainted while measuring... Try again later.")
+            time.sleep(1)
 
-    Timer(5.0, update_heartbeat).start()
+        start_api_time = time.time()
+        gemini_reply = model.generate_content("Just say pong!").text.strip()
+        api_latency = round((time.time() - start_api_time) * 1000)
+        uptime = format_uptime(time.time() - BOT_START_TIME)
+
+        group_link = "https://t.me/the_jellybeans"
+        reply = (
+            f"╭───[ 🩷 <b>Mitsuri Ping Report</b> ]───\n"
+            f"├ Hello <b>{name}</b>, senpai~\n"
+            f"├ THE_JellyBeans: <a href='{group_link}'>@the_jellybeans</a>\n"
+            f"├ Gemini: <b>{gemini_reply}</b>\n"
+            f"├ API Latency: <b>{api_latency} ms</b>\n"
+            f"├ Bot Uptime: <b>{uptime}</b>\n"
+            f"╰⏱️ Ping stable, ready to flirt anytime"
+        )
+
+        context.bot.edit_message_text(
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            text=reply,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logging.error(f"/ping error: {e}")
+        msg.edit_text("Oops~ I fainted while measuring... Try again later, okay? 😵‍💫")
 
 def show_chats(update: Update, context: CallbackContext):
-    if not update.message:
-        return
-    if update.message.from_user.id != OWNER_ID or update.message.chat_id != SPECIAL_GROUP_ID:
-        return
-    keyboard = [
-        [
-            InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal"),
-            InlineKeyboardButton("👥 Group Chats", callback_data="show_groups")
+    if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
+        buttons = [
+            [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
+             InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
         ]
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text("Choose what to show:", reply_markup=markup)
+        update.message.reply_text("Choose what to show:", reply_markup=InlineKeyboardMarkup(buttons))
 
 def show_callback(update: Update, context: CallbackContext):
     query = update.callback_query
-    data = query.data
     query.answer()
+    data = query.data
 
-    if data == "show_personal":
-        users = chat_info_collection.find({"chat_id": {"$gt": 0}})
-        lines = ["<b>Personal Users:</b>"]
-        for user in users:
+    if data == "back_to_menu":
+        buttons = [
+            [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
+             InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
+        ]
+        return query.edit_message_text("Choose what to show:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    page = int(data.split("_")[-1])
+    start = page * 10
+    end = start + 10
+
+    if data.startswith("show_personal_"):
+        users = list(chat_info_collection.find({"chat_id": {"$gt": 0}}))
+        selected = users[start:end]
+        lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
+        for user in selected:
             uid = user.get("chat_id")
             uname = user.get("username", "N/A")
             name = user.get("name", "Unknown")
-            lines.append(f"• {name} (@{uname}) - ID: <code>{uid}</code>")
-        query.edit_message_text("\n".join(lines), parse_mode="HTML")
+            lines.append(f"• <b>{name}</b> (@{uname})\n  ID: <code>{uid}</code>")
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_personal_{page - 1}"))
+        if end < len(users):
+            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_personal_{page + 1}"))
+        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup([buttons]))
 
-    elif data == "show_groups":
-        groups = chat_info_collection.find({"chat_id": {"$lt": 0}})
-        lines = ["<b>Group Info:</b>"]
-        for group in groups:
+    elif data.startswith("show_groups_"):
+        groups = list(chat_info_collection.find({"chat_id": {"$lt": 0}}))
+        selected = groups[start:end]
+        lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
+        for group in selected:
             gid = group.get("chat_id")
-            title = group.get("title", "Unnamed Group")
+            title = group.get("title", "Unnamed")
             adder = group.get("added_by", "Unknown")
-            link = f"https://t.me/c/{str(gid)[4:]}"
+            link = f"https://t.me/c/{str(gid)[4:]}" if str(gid).startswith("-100") else "N/A"
             lines.append(
-                f"• <b>{title}</b>\n"
-                f"  ID: <code>{gid}</code>\n"
-                f"  Added By: {adder}\n"
-                f"  Link: <a href='{link}'>{title}</a>"
+                f"• <b>{title}</b>\n  ID: <code>{gid}</code>\n"
+                f"  Added By: {adder}\n  Link: <a href='{link}'>Open Group</a>"
             )
-        query.edit_message_text("\n\n".join(lines), parse_mode="HTML")
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_groups_{page - 1}"))
+        if end < len(groups):
+            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_groups_{page + 1}"))
+        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML",
+                                reply_markup=InlineKeyboardMarkup([buttons]))
 
 def track_bot_added_removed(update: Update, context: CallbackContext):
-    chat_member_update = update.my_chat_member
-    if not chat_member_update:
-        return
-
-    old_status = chat_member_update.old_chat_member.status
-    new_status = chat_member_update.new_chat_member.status
-    if chat_member_update.new_chat_member.user.id != context.bot.id:
-        return
-
-    user = chat_member_update.from_user
-    chat = chat_member_update.chat
-    chat_title = chat.title or "this chat"
-    user_mention = f"<a href='tg://user?id={user.id}'>{user.first_name}</a>"
-
-    if old_status in ["left", "kicked"] and new_status in ["member", "administrator"]:
-        save_chat_info(chat.id, title=chat_title, added_by=user_mention)
-        msg = f"{user_mention} added me to <b>{chat_title}</b>."
-    elif old_status in ["member", "administrator"] and new_status in ["left", "kicked"]:
-        msg = f"{user_mention} removed me from <b>{chat_title}</b>."
-    else:
-        return
-
-    context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
+    cmu = update.my_chat_member
+    if cmu and cmu.new_chat_member.user.id == context.bot.id:
+        old = cmu.old_chat_member.status
+        new = cmu.new_chat_member.status
+        user = cmu.from_user
+        chat = cmu.chat
+        if old in ["left", "kicked"] and new in ["member", "administrator"]:
+            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> added me to <b>{chat.title}</b>."
+            save_chat_info(chat.id, user=user, chat=chat)
+        elif new in ["left", "kicked"]:
+            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> removed me from <b>{chat.title}</b>."
+        else:
+            return
+        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
 
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
@@ -238,12 +247,11 @@ def handle_message(update: Update, context: CallbackContext):
     user = update.message.from_user
     chat_id = update.message.chat_id
     chat_type = update.message.chat.type
-    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25]
+    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
     if chat_type in ["group", "supergroup"]:
         is_reply = (
             update.message.reply_to_message
-            and update.message.reply_to_message.from_user
             and update.message.reply_to_message.from_user.id == context.bot.id
         )
         if not ("mitsuri" in user_input.lower() or is_reply):
@@ -252,11 +260,13 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Hehe~🤭, Hi cutie pie🫣?")
             return
 
-    save_chat_info(chat_id, username=user.username, name=chosen_name)
-    last_two_messages = [("user", user_input)]
+    save_chat_info(chat_id, user=user, chat=update.message.chat)
+
+    last_two_messages = [("user", update.message.text)]
     prompt = build_prompt(last_two_messages, user_input, chosen_name)
     send_typing(update, context)
     reply = generate_with_retry(prompt)
+    last_two_messages.append(("bot", reply))
     safe_reply_text(update, reply)
 
 def error_handler(update: object, context: CallbackContext):
@@ -271,7 +281,6 @@ def error_handler(update: object, context: CallbackContext):
     except Exception as e:
         logging.error(f"Unhandled error: {e}")
 
-# === MAIN ===
 if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
@@ -279,9 +288,9 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("show", show_chats))
-    dp.add_handler(CallbackQueryHandler(show_callback))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
+    dp.add_handler(CallbackQueryHandler(show_callback))
     dp.add_error_handler(error_handler)
 
     updater.start_polling()
