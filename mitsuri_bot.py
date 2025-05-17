@@ -111,7 +111,7 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
         except Exception as e:
             logging.error(f"Gemini error attempt {attempt + 1}: {e}")
             time.sleep(delay)
-    return "Busy rn, sorry 😐!"
+    return "Get lost, I'm busy rn!"
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -146,7 +146,7 @@ def ping(update: Update, context: CallbackContext):
                 f"├ <a href='https://t.me/the_jellybeans'>THE_JellyBeans</a>: <b>{gemini_reply}</b>\n"
                 f"├ API Latency: <b>{api_latency} ms</b>\n"
                 f"├ Bot Uptime: <b>{uptime_str}</b>\n"
-                f"╰⏱️ Ping stable, ready to flirt anytime"
+                f"╰⏱️ Ping stable"
             )
             context.bot.edit_message_text(
                 chat_id=heartbeat_msg.chat_id,
