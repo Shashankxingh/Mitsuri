@@ -4,15 +4,10 @@ import datetime
 import logging
 from dotenv import load_dotenv
 import google.generativeai as genai
-from telegram import Update, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
-    Updater,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext,
-    ChatMemberHandler,
-    CallbackQueryHandler,
+    Updater, CommandHandler, MessageHandler, Filters,
+    CallbackContext, ChatMemberHandler, CallbackQueryHandler
 )
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
@@ -23,24 +18,25 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# === Owner and special group config ===
+# === Owner and group IDs ===
 OWNER_ID = 7563434309
 SPECIAL_GROUP_ID = -1002453669999
 
-# === Configure Gemini ===
+# === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
-# === MongoDB Setup ===
+# === MongoDB setup ===
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
 
-# === Logging Setup ===
+# === Logging setup ===
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
+# === Constants ===
 REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
 
@@ -49,7 +45,7 @@ def save_chat_info(chat_id, user=None, chat=None):
     if user:
         data["name"] = user.first_name
         data["username"] = user.username
-        data["added_by"] = f"{user.first_name} (@{user.username})"
+        data["user_id"] = user.id
     if chat and chat.type != "private":
         data["title"] = chat.title
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
@@ -64,7 +60,7 @@ def send_typing(update: Update, context: CallbackContext):
         logging.warning(f"Typing animation failed: {e}")
 
 def build_prompt(last_two_messages, user_input, chosen_name):
-    system_instructions = f"""
+    system_instructions = """
 You are Mitsuri Kanroji from Demon Slayer. You’re cute, bold, and smart.
 
 Rules:
@@ -187,9 +183,10 @@ def show_callback(update: Update, context: CallbackContext):
         lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
         for user in selected:
             uid = user.get("chat_id")
-            uname = user.get("username", "N/A")
             name = user.get("name", "Unknown")
-            lines.append(f"• <b>{name}</b> (@{uname})\n  ID: <code>{uid}</code>")
+            user_id = user.get("user_id")
+            link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
+            lines.append(f"• {link}\n  ID: <code>{uid}</code>")
         buttons = []
         if page > 0:
             buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_personal_{page - 1}"))
@@ -206,11 +203,15 @@ def show_callback(update: Update, context: CallbackContext):
         for group in selected:
             gid = group.get("chat_id")
             title = group.get("title", "Unnamed")
-            adder = group.get("added_by", "Unknown")
-            link = f"https://t.me/c/{str(gid)[4:]}" if str(gid).startswith("-100") else "N/A"
+            adder_id = group.get("user_id")
+            adder_name = group.get("name", "Unknown")
+            adder_link = f"<a href='tg://user?id={adder_id}'>{adder_name}</a>" if adder_id else adder_name
+            group_link = f"https://t.me/c/{str(gid)[4:]}" if str(gid).startswith("-100") else "N/A"
             lines.append(
-                f"• <b>{title}</b>\n  ID: <code>{gid}</code>\n"
-                f"  Added By: {adder}\n  Link: <a href='{link}'>Open Group</a>"
+                f"• <b>{title}</b>\n"
+                f"  ID: <code>{gid}</code>\n"
+                f"  Added By: {adder_link}\n"
+                f"  Link: <a href='{group_link}'>Open Group</a>"
             )
         buttons = []
         if page > 0:
