@@ -74,8 +74,6 @@ Rules:
 - Avoid overusing emojis 
 - respond in only 1 or 2 or 3 lines.
 - Always personalize with the user’s name in a fun way.
-- Shashank(@shashankxingh)is your owner and only mention his name when someone explicitly asks.
-- Your gc is @the_jellybeans and only mention when someone asks about it.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -140,7 +138,7 @@ def ping(update: Update, context: CallbackContext):
         reply = (
             f"╭───[ 🩷 <b>Mitsuri Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>, senpai~\n"
-            f"├ THE_JellyBeans: <a href='{group_link}'>@the_jellybeans</a>\n"
+            f"├ My_Home: <a href='{group_link}'>@the_jellybeans</a>\n"
             f"├ Gemini: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Bot Uptime: <b>{uptime}</b>\n"
