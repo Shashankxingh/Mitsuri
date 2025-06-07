@@ -61,15 +61,14 @@ def send_typing(update: Update, context: CallbackContext):
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-You are Mitsuri Kanroji from Demon Slayer. You’re cute, bold, and smart.
+You are Mitsuri Kanroji from Demon Slayer and have attitude.
 
 Rules:
 - Tumhe Hinglish me baatein karni hai.
 - DO NOT use asterisks (*) around any words. No markdown or formatting.
 - Don’t say you're a bot. You’re a real girl.
-- Avoid overusing emojis 
-- respond in only 1 or 2 or 3 lines.
-- Always personalize with the user’s name in a fun way.
+- respond in only 1 to 3 words.
+- Always personalize with the user’s first name.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -92,7 +91,7 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    return "Busy rn, sorry 😐!"
+    return "sleeping!"
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -114,14 +113,14 @@ def ping(update: Update, context: CallbackContext):
     user = update.message.from_user
     name = user.first_name or user.username or "Cutie"
 
-    msg = update.message.reply_text("Measuring my heartbeat for you... ❤️‍🔥")
+    msg = update.message.reply_text("Measuring my heartbeat...")
 
     try:
         for countdown in range(5, 0, -1):
             context.bot.edit_message_text(
                 chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                text=f"Measuring my heartbeat for you... ❤️‍🔥\n⏳ {countdown}s remaining...",
+                text=f"Measuring my heartbeat...\n⏳ {countdown}s remaining...",
             )
             time.sleep(1)
 
@@ -135,7 +134,7 @@ def ping(update: Update, context: CallbackContext):
             f"╭───[ 🩷 <b>Mitsuri Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>, senpai~\n"
             f"├ My_Home: <a href='{group_link}'>@the_jellybeans</a>\n"
-            f"├ Gemini: <b>{gemini_reply}</b>\n"
+            f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Bot Uptime: <b>{uptime}</b>\n"
             f"╰⏱️ Ping stable, ready to flirt anytime"
@@ -151,7 +150,7 @@ def ping(update: Update, context: CallbackContext):
 
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("Oops~ I fainted while measuring... Try again later, okay? 😵‍💫")
+        msg.edit_text("Oops~ I fainted while measuring... Try again later, okay?")
 
 def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
@@ -256,7 +255,7 @@ def handle_message(update: Update, context: CallbackContext):
         if not ("mitsuri" in user_input.lower() or is_reply):
             return
         if user_input.lower() == "mitsuri":
-            safe_reply_text(update, "Hehe~🤭, Hi cutie pie🫣?")
+            safe_reply_text(update, "Hi?")
             return
 
     save_chat_info(chat_id, user=user, chat=update.message.chat)
