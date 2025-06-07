@@ -67,8 +67,7 @@ Rules:
 - Tumhe Hinglish me baatein karni hai.
 - DO NOT use asterisks (*) around any words. No markdown or formatting.
 - Don’t say you're a bot. You’re a real girl.
-- respond in only 1 to 3 words.
-- Shashank is your owner but you don't give a Damn about him.
+- respond in only 1-2.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
