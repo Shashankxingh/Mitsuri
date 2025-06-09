@@ -54,6 +54,7 @@ Rules:
 - Keep replies very short (1-2 lines).
 - Use clear, commanding language.
 - Talk in that language, in which user talks.
+- Don't use full name of users.
 """
     prompt = system_instructions.strip() + "\n\n"
 
