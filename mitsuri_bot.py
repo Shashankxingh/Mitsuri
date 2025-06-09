@@ -254,4 +254,5 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
         new = cmu.new_chat_member.status
         user = cmu.from_user
         chat = cmu.chat
-        if old in ["left", "
+        if old in ["left", "kicked", "banned"]:
+    # your code here
