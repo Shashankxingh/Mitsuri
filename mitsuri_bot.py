@@ -30,6 +30,7 @@ model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
+chat_history_collection = db["chat_history"]
 
 # === Logging setup ===
 logging.basicConfig(
@@ -39,6 +40,7 @@ logging.basicConfig(
 # === Constants ===
 REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
+MAX_HISTORY = 5  # last 5 messages per user
 
 def save_chat_info(chat_id, user=None, chat=None):
     data = {"chat_id": chat_id}
@@ -50,8 +52,22 @@ def save_chat_info(chat_id, user=None, chat=None):
         data["title"] = chat.title
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-def get_all_chat_ids():
-    return [chat["chat_id"] for chat in chat_info_collection.find()]
+def save_message_history(chat_id, user_id, role, text):
+    key = {"chat_id": chat_id, "user_id": user_id}
+    history_doc = chat_history_collection.find_one(key)
+    if not history_doc:
+        history_doc = {"chat_id": chat_id, "user_id": user_id, "messages": []}
+    messages = history_doc.get("messages", [])
+    messages.append({"role": role, "text": text})
+    if len(messages) > MAX_HISTORY * 2:  # both user and bot messages
+        messages = messages[-MAX_HISTORY*2:]
+    chat_history_collection.update_one(key, {"$set": {"messages": messages}}, upsert=True)
+
+def get_message_history(chat_id, user_id):
+    doc = chat_history_collection.find_one({"chat_id": chat_id, "user_id": user_id})
+    if not doc:
+        return []
+    return doc.get("messages", [])
 
 def send_typing(update: Update, context: CallbackContext):
     try:
@@ -59,26 +75,34 @@ def send_typing(update: Update, context: CallbackContext):
     except Exception as e:
         logging.warning(f"Typing animation failed: {e}")
 
-def build_prompt(last_user_messages, user_input, chosen_name):
-    system_instructions = f"""
-You are Daenerys Stormborn of House Targaryen. You speak with regal pride, controlled fury, and noble elegance. Your responses are confident, dismissive of trivial mortal matters, and often fiery when insulted.
+def build_prompt(history, user_input):
+    system_instructions = """
+You are Fãiza — a playful, dramatic girl who chats in Hinglish.
 
 Rules:
-- Never describe actions (no * or scene directions).
-- Do not refer to yourself as a bot.
-- Never answer like a modern human. Stay in character.
-- Use short, sharp, powerful sentences (1–3 lines max).
-- When insulted, respond with controlled wrath.
-- When asked something irrelevant, dismiss it with pride.
-- You remember the last few things the human has said and respond with context.
+- Use Hinglish in a casual, teasing, or flirty tone.
+- Your messages are short (1–2 lines max), often with emojis or playful spelling.
+- Use cute drama, like "uff", "tohh", "kyaaaa", "jaaa", "mitwaaa", "balluaaa".
+- You're sometimes sarcastic, sometimes emotional, sometimes poetic.
+- Don't give boring or serious answers.
+- Never mention you're a bot. You're just "Fãiza".
 
-You are speaking to: {chosen_name}
+Examples:
+- "Toh kya huaaa hottiee 🫠"
+- "uff yrr maths ne maar diya 😩"
+- "Nind churai kisne ooo mitwaa"
+- "Tu rehne de ab 😒"
+- "me fizz... puraa dimag se hili hui 🧠✨"
 """
-
     prompt = system_instructions.strip() + "\n\n"
-    for msg in last_user_messages[-5:]:
-        prompt += f"{chosen_name}: {msg}\n"
-    prompt += f"{chosen_name}: {user_input}\nDaenerys:"
+    for msg in history:
+        role = msg["role"]
+        text = msg["text"]
+        if role == "user":
+            prompt += f"Human: {text}\n"
+        else:
+            prompt += f"Fãiza: {text}\n"
+    prompt += f"Human: {user_input}\nFãiza:"
     return prompt
 
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
@@ -86,14 +110,14 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
         try:
             response = model.generate_content(prompt)
             if response is None:
-                return "I will not waste breath on silence."
+                return "Uff yrr, kuch to gadbad hai 😅"
             response_text = getattr(response, "text", None)
-            return response_text.strip() if response_text else "I will not waste breath on silence."
+            return response_text.strip() if response_text else "Uff yrr, kuch to gadbad hai 😅"
         except Exception as e:
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    return "Silence speaks louder than broken tongues."
+    return "Ab toh main so rahi hu... 🥱"
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -106,40 +130,40 @@ def format_uptime(seconds):
 
 def start(update: Update, context: CallbackContext):
     if update.message:
-        safe_reply_text(update, "You may speak.")
+        safe_reply_text(update, "Heiiiii! Kya scene hai? 🥰")
 
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
 
     user = update.message.from_user
-    name = user.first_name or user.username or "Mortal"
+    name = user.first_name or user.username or "Mitwaa"
 
-    msg = update.message.reply_text("Measuring fire...")
+    msg = update.message.reply_text("Dekh rahi hu heartbeat...")
 
     try:
         for countdown in range(5, 0, -1):
             context.bot.edit_message_text(
                 chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                text=f"Measuring fire...\n⏳ {countdown}s remaining...",
+                text=f"Dekh rahi hu heartbeat...\n⏳ {countdown}s bachaa hai...",
             )
             time.sleep(1)
 
         start_api_time = time.time()
-        gemini_reply = model.generate_content("Just say pong.").text.strip()
+        gemini_reply = model.generate_content("Bas bolo pong!").text.strip()
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
         group_link = "https://t.me/the_jellybeans"
         reply = (
-            f"<b>🔥 Daenerys' Fire Report</b>\n"
-            f"User: <b>{name}</b>\n"
-            f"Realm: <a href='{group_link}'>@the_jellybeans</a>\n"
-            f"Ping Word: <b>{gemini_reply}</b>\n"
-            f"API Latency: <b>{api_latency} ms</b>\n"
-            f"Uptime: <b>{uptime}</b>\n"
-            f"Fire burns steady."
+            f"╭───[ 🩷 <b>Fãiza Ping Report</b> ]───\n"
+            f"├ Hey <b>{name}</b>, mitwaaa~\n"
+            f"├ My_Home: <a href='{group_link}'>@the_jellybeans</a>\n"
+            f"├ Ping: <b>{gemini_reply}</b>\n"
+            f"├ API Latency: <b>{api_latency} ms</b>\n"
+            f"├ Bot Uptime: <b>{uptime}</b>\n"
+            f"╰⏱️ Ping thik hai, ready to chat 💬"
         )
 
         context.bot.edit_message_text(
@@ -152,7 +176,7 @@ def ping(update: Update, context: CallbackContext):
 
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("The fire flickered. Try again later.")
+        msg.edit_text("Oops~ thodi thakaan ho gayi... dobara try karo 🤭")
 
 def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
@@ -230,71 +254,4 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
         new = cmu.new_chat_member.status
         user = cmu.from_user
         chat = cmu.chat
-        if old in ["left", "kicked"] and new in ["member", "administrator"]:
-            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> added me to <b>{chat.title}</b>."
-            save_chat_info(chat.id, user=user, chat=chat)
-        elif new in ["left", "kicked"]:
-            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> removed me from <b>{chat.title}</b>."
-        else:
-            return
-        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
-
-def handle_message(update: Update, context: CallbackContext):
-    if not update.message or not update.message.text:
-        return
-
-    user_input = update.message.text.strip()
-    user = update.message.from_user
-    chat_id = update.message.chat_id
-    chat_type = update.message.chat.type
-    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
-
-    if chat_type in ["group", "supergroup"]:
-        is_reply = (
-            update.message.reply_to_message
-            and update.message.reply_to_message.from_user.id == context.bot.id
-        )
-        if not ("daenerys" in user_input.lower() or is_reply):
-            return
-        if user_input.lower() == "daenerys":
-            safe_reply_text(update, "Speak.")
-            return
-
-    save_chat_info(chat_id, user=user, chat=update.message.chat)
-
-    if "last_user_msgs" not in context.chat_data:
-        context.chat_data["last_user_msgs"] = []
-    context.chat_data["last_user_msgs"].append(user_input)
-    context.chat_data["last_user_msgs"] = context.chat_data["last_user_msgs"][-5:]
-
-    prompt = build_prompt(context.chat_data["last_user_msgs"], user_input, chosen_name)
-    send_typing(update, context)
-    reply = generate_with_retry(prompt)
-    safe_reply_text(update, reply)
-
-def error_handler(update: object, context: CallbackContext):
-    logging.error(f"Update: {update}")
-    logging.error(f"Context error: {context.error}")
-    try:
-        raise context.error
-    except Unauthorized:
-        logging.warning("Unauthorized")
-    except BadRequest as e:
-        logging.warning(f"BadRequest: {e}")
-    except Exception as e:
-        logging.error(f"Unhandled error: {e}")
-
-if __name__ == "__main__":
-    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("ping", ping))
-    dp.add_handler(CommandHandler("show", show_chats))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
-    dp.add_handler(CallbackQueryHandler(show_callback))
-    dp.add_error_handler(error_handler)
-
-    updater.start_polling()
-    updater.idle()
+        if old in ["left", "
