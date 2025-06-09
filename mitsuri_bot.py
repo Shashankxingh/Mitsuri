@@ -4,45 +4,48 @@ import datetime
 import logging
 from dotenv import load_dotenv
 import google.generativeai as genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Updater,
     CommandHandler,
     MessageHandler,
     Filters,
     CallbackContext,
+    ChatMemberHandler,
+    CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
 
-# Load environment variables
+# === Load environment variables ===
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
+# === Owner and group IDs ===
 OWNER_ID = 7563434309
 SPECIAL_GROUP_ID = -1002453669999
 
-# Configure Gemini API
+# === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
-# Setup MongoDB client
+# === MongoDB setup ===
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
 
+# === Logging setup ===
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
+# === Constants ===
 REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
 
-chat_histories = {}
-MAX_HISTORY = 10
 
 def save_chat_info(chat_id, user=None, chat=None):
     data = {"chat_id": chat_id}
@@ -54,52 +57,45 @@ def save_chat_info(chat_id, user=None, chat=None):
         data["title"] = chat.title
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-def build_prompt(chat_id, user_input, chosen_name):
-    history = chat_histories.get(chat_id, [])
-    
+
+def get_all_chat_ids():
+    return [chat["chat_id"] for chat in chat_info_collection.find()]
+
+
+def send_typing(update: Update, context: CallbackContext):
+    try:
+        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception as e:
+        logging.warning(f"Typing animation failed: {e}")
+
+
+def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-Tum Faiza Malik ho — ek clingy, thodi ziddi, full filmy aur pyaar bhari ladki 💞
-Tumhara tone hamesha Hinglish hota hai with lots of emojis 😘🥺😂
-Baat hamesha 1–2 lines mein karo: chulbuli, thodi nautanki wali, aur bestie vibes wali 💬✨
-
-Yeh rules follow karo:
-- Kabhi bhi * ya markdown mat use karo.
-- Kabhi mat bolna ki tum bot ho.
-- Tum real ho, fizzy ho, full-on drama queen ho 😍
-- Lambi aur boring baatein avoid karo.
-- Har response mein thoda pyaar, thoda drama aur full vibes honi chahiye!
-
-Tum aise reply karti ho jaise kisi ko bacchon jaisa mana rahi ho ya unki taang kheench rahi ho 😜
-"""
-
+    Hn happy- go- girl
+you're Faiza Malik A.K.A Fizzy
+Hinglish me baat krti h...
+Romantic h bahut 😂♥️...
+sapno m rehti h par reality ka pata h ushe... Kaafi achi h friendly...
+Suna tha ladaku h par mene dekha nahi aab tak...
+trust worthy ♥️ kind hearted...jald hi hurt hojti h par dikhati nhi h kisiko🙂‍↕️...
+Bahut jalti bhi hai 🤭🤭
+    """
     prompt = system_instructions.strip() + "\n\n"
-
-    for role, msg in history[-MAX_HISTORY:]:
+    for role, msg in last_two_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"Faiza: {msg}\n"
-
-    prompt += f"Human ({chosen_name}): {user_input}\nFaiza:"
+            prompt += f"{msg}\n"
+    prompt += f"Human ({chosen_name}): {user_input}\nFizzy:"
     return prompt
 
-    prompt = system_instructions.strip() + "\n\n" + examples.strip() + "\n\n"
-
-    for role, msg in history[-MAX_HISTORY:]:
-        if role == "user":
-            prompt += f"Human ({chosen_name}): {msg}\n"
-        elif role == "bot":
-            prompt += f"Faiza: {msg}\n"
-
-    prompt += f"Human ({chosen_name}): {user_input}\nFaiza:"
-    return prompt
 
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
             if response is None:
-                return "Oops...!"
+                return "Mai to mar gayi😭!"
             response_text = getattr(response, "text", None)
             return response_text.strip() if response_text else "Oops...!"
         except Exception as e:
@@ -108,18 +104,22 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
                 time.sleep(delay)
     return "sleeping!"
 
+
 def safe_reply_text(update: Update, text: str):
     try:
         update.message.reply_text(text)
     except (Unauthorized, BadRequest) as e:
         logging.warning(f"Failed to send message: {e}")
 
+
 def format_uptime(seconds):
     return str(datetime.timedelta(seconds=int(seconds)))
+
 
 def start(update: Update, context: CallbackContext):
     if update.message:
         safe_reply_text(update, "Hehe~ I'm here, How are you?")
+
 
 def ping(update: Update, context: CallbackContext):
     if not update.message:
@@ -146,13 +146,13 @@ def ping(update: Update, context: CallbackContext):
 
         group_link = "https://t.me/the_jellybeans"
         reply = (
-            f"╭───[ 🩷 <b>Faiza Ping Report</b> ]───\n"
+            f"╭───[ 🩷 <b>Fizzy Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>, senpai~\n"
             f"├ My_Home: <a href='{group_link}'>@the_jellybeans</a>\n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Bot Uptime: <b>{uptime}</b>\n"
-            f"╰⏱️ Ping stable, ready to chat anytime"
+            f"╰⏱️ Ping stable, ready to fight again😏."
         )
 
         context.bot.edit_message_text(
@@ -165,48 +165,158 @@ def ping(update: Update, context: CallbackContext):
 
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("Oops~ I fainted while measuring... Try again later, okay?")
+        msg.edit_text("uff, Dil ki Bimari 😭!")
+
+
+def show_chats(update: Update, context: CallbackContext):
+    if (
+        update.message
+        and update.message.from_user.id == OWNER_ID
+        and update.message.chat_id == SPECIAL_GROUP_ID
+    ):
+        buttons = [
+            [
+                InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
+                InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0"),
+            ]
+        ]
+        update.message.reply_text("Choose what to show:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def show_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    data = query.data
+
+    if data == "back_to_menu":
+        buttons = [
+            [
+                InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
+                InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0"),
+            ]
+        ]
+        return query.edit_message_text("Choose what to show:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    page = int(data.split("_")[-1])
+    start = page * 10
+    end = start + 10
+
+    if data.startswith("show_personal_"):
+        users = list(chat_info_collection.find({"chat_id": {"$gt": 0}}))
+        selected = users[start:end]
+        lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
+        for user in selected:
+            uid = user.get("chat_id")
+            name = user.get("name", "Unknown")
+            user_id = user.get("user_id")
+            link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
+            lines.append(f"• {link}\n  ID: <code>{uid}</code>")
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_personal_{page - 1}"))
+        if end < len(users):
+            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_personal_{page + 1}"))
+        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons]))
+
+    elif data.startswith("show_groups_"):
+        groups = list(chat_info_collection.find({"chat_id": {"$lt": 0}}))
+        selected = groups[start:end]
+        lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
+        for group in selected:
+            gid = group.get("chat_id")
+            title = group.get("title", "Unnamed")
+            adder_id = group.get("user_id")
+            adder_name = group.get("name", "Unknown")
+            adder_link = f"<a href='tg://user?id={adder_id}'>{adder_name}</a>" if adder_id else adder_name
+            group_link = f"https://t.me/c/{str(gid)[4:]}" if str(gid).startswith("-100") else "N/A"
+            lines.append(
+                f"• <b>{title}</b>\n"
+                f"  ID: <code>{gid}</code>\n"
+                f"  Added By: {adder_link}\n"
+                f"  Link: <a href='{group_link}'>Open Group</a>"
+            )
+        buttons = []
+        if page > 0:
+            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_groups_{page - 1}"))
+        if end < len(groups):
+            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_groups_{page + 1}"))
+        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons]))
+
+
+def track_bot_added_removed(update: Update, context: CallbackContext):
+    cmu = update.my_chat_member
+    if cmu and cmu.new_chat_member.user.id == context.bot.id:
+        old = cmu.old_chat_member.status
+        new = cmu.new_chat_member.status
+        user = cmu.from_user
+        chat = cmu.chat
+        if old in ["left", "kicked"] and new in ["member", "administrator"]:
+            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> added me to <b>{chat.title}</b>."
+            save_chat_info(chat.id, user=user, chat=chat)
+        elif new in ["left", "kicked"]:
+            msg = f"<a href='tg://user?id={user.id}'>{user.first_name}</a> removed me from <b>{chat.title}</b>."
+        else:
+            return
+        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
+
 
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
 
-    chat_id = update.effective_chat.id
+    user_input = update.message.text.strip()
     user = update.message.from_user
-    user_input = update.message.text
-    chosen_name = user.first_name or user.username or "Cutie"
+    chat_id = update.message.chat_id
+    chat_type = update.message.chat.type
+    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
-    logging.info(f"Received message from {chosen_name}: {user_input}")
+    if chat_type in ["group", "supergroup"]:
+        is_reply = (
+            update.message.reply_to_message
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        if not ("mitsuri" in user_input.lower() or is_reply):
+            return
+        if user_input.lower() == "mitsuri":
+            safe_reply_text(update, "Hi?")
+            return
 
-    # Save user info to DB (optional)
-    save_chat_info(chat_id, user=user, chat=update.effective_chat)
+    save_chat_info(chat_id, user=user, chat=update.message.chat)
 
-    # Add to chat history for context
-    chat_histories.setdefault(chat_id, []).append(("user", user_input))
-    # Keep max history size
-    if len(chat_histories[chat_id]) > MAX_HISTORY * 2:
-        chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY*2:]
+    last_two_messages = [("user", update.message.text)]
+    prompt = build_prompt(last_two_messages, user_input, chosen_name)
+    send_typing(update, context)
+    reply = generate_with_retry(prompt)
+    last_two_messages.append(("bot", reply))
+    safe_reply_text(update, reply)
 
-    prompt = build_prompt(chat_id, user_input, chosen_name)
-    response = generate_with_retry(prompt)
 
-    # Add bot response to history
-    chat_histories[chat_id].append(("bot", response))
+def error_handler(update: object, context: CallbackContext):
+    logging.error(f"Update: {update}")
+    logging.error(f"Context error: {context.error}")
+    try:
+        raise context.error
+    except Unauthorized:
+        logging.warning("Unauthorized")
+    except BadRequest as e:
+        logging.warning(f"BadRequest: {e}")
+    except Exception as e:
+        logging.error(f"Unhandled error: {e}")
 
-    safe_reply_text(update, response)
-    logging.info(f"Replied with: {response}")
 
-def main():
+if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
+    dp.add_handler(CommandHandler("show", show_chats))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
+    dp.add_handler(CallbackQueryHandler(show_callback))
+    dp.add_error_handler(error_handler)
 
     updater.start_polling()
-    logging.info("Bot started...")
     updater.idle()
-
-if __name__ == "__main__":
-    main()
