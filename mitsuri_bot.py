@@ -11,8 +11,6 @@ from telegram.ext import (
     MessageHandler,
     Filters,
     CallbackContext,
-    ChatMemberHandler,
-    CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
@@ -26,9 +24,11 @@ MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = 7563434309
 SPECIAL_GROUP_ID = -1002453669999
 
+# Configure Gemini API
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
 
+# Setup MongoDB client
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
@@ -42,7 +42,6 @@ REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
 
 chat_histories = {}
-
 MAX_HISTORY = 10
 
 def save_chat_info(chat_id, user=None, chat=None):
@@ -54,15 +53,6 @@ def save_chat_info(chat_id, user=None, chat=None):
     if chat and chat.type != "private":
         data["title"] = chat.title
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
-
-def get_all_chat_ids():
-    return [chat["chat_id"] for chat in chat_info_collection.find()]
-
-def send_typing(update: Update, context: CallbackContext):
-    try:
-        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception as e:
-        logging.warning(f"Typing animation failed: {e}")
 
 def build_prompt(chat_id, user_input, chosen_name):
     history = chat_histories.get(chat_id, [])
@@ -206,5 +196,46 @@ def ping(update: Update, context: CallbackContext):
         logging.error(f"/ping error: {e}")
         msg.edit_text("Oops~ I fainted while measuring... Try again later, okay?")
 
-# Remaining functions: show_chats, show_callback, track_bot_added_removed, handle_message, main
-# (These are unchanged and you already have them in your original script. No need to repeat for this fix.)
+def handle_message(update: Update, context: CallbackContext):
+    if not update.message or not update.message.text:
+        return
+
+    chat_id = update.effective_chat.id
+    user = update.message.from_user
+    user_input = update.message.text
+    chosen_name = user.first_name or user.username or "Cutie"
+
+    logging.info(f"Received message from {chosen_name}: {user_input}")
+
+    # Save user info to DB (optional)
+    save_chat_info(chat_id, user=user, chat=update.effective_chat)
+
+    # Add to chat history for context
+    chat_histories.setdefault(chat_id, []).append(("user", user_input))
+    # Keep max history size
+    if len(chat_histories[chat_id]) > MAX_HISTORY * 2:
+        chat_histories[chat_id] = chat_histories[chat_id][-MAX_HISTORY*2:]
+
+    prompt = build_prompt(chat_id, user_input, chosen_name)
+    response = generate_with_retry(prompt)
+
+    # Add bot response to history
+    chat_histories[chat_id].append(("bot", response))
+
+    safe_reply_text(update, response)
+    logging.info(f"Replied with: {response}")
+
+def main():
+    updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("ping", ping))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    updater.start_polling()
+    logging.info("Bot started...")
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
