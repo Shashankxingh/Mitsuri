@@ -4,8 +4,8 @@ import datetime
 import logging
 import re
 from dotenv import load_dotenv
+from html import escape  # <-- changed here
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
-from telegram.helpers import escape
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -260,7 +260,6 @@ def handle_message(update: Update, context: CallbackContext):
     chat_type = chat.type
     chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
-    # Cooldown for groups
     if chat_type in ["group", "supergroup"]:
         now = time.time()
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 10:
