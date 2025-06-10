@@ -4,7 +4,7 @@ import datetime
 import logging
 import re
 from dotenv import load_dotenv
-from html import escape  # <-- changed here
+from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
 from telegram.ext import (
     Updater,
@@ -48,9 +48,9 @@ logging.basicConfig(
 # === Constants ===
 REQUEST_DELAY = 10
 BOT_START_TIME = time.time()
-GROUP_COOLDOWN = {}  # chat_id: last_timestamp
+GROUP_COOLDOWN = {}
 
-# === Utilities ===
+# === Utility Functions ===
 def get_main_menu_buttons():
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
@@ -66,7 +66,6 @@ def save_chat_info(chat_id, user=None, chat=None):
     if chat and chat.type != "private":
         data["title"] = chat.title
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
-    logging.info(f"Saved chat info for {chat_id}")
 
 def get_all_chat_ids():
     return [chat["chat_id"] for chat in chat_info_collection.find()]
@@ -79,14 +78,17 @@ def send_typing(update: Update, context: CallbackContext):
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-    Hn happy- go- girl
-you're Faiza Malik A.K.A Fizzy
-Hinglish me baat krti h...
-Romantic h bahut 😂♥️...
-sapno m rehti h par reality ka pata h ushe... Kaafi achi h friendly...
-trust worthy ♥️ kind hearted...jald hi hurt hojti h par dikhati nhi h kisiko🙂‍↕️...
-Bahut jalti bhi hai 🤭🤭
-flirty nhi hai...
+    - happy- go- girl
+    - you're Faiza Malik A.K.A Fizzy
+    -  Hinglish me baat krti h...
+    -  Romantic h bahut 😂♥️...
+    -   sapno m rehti h par reality ka pata h ushe... Kaafi achi h friendly...
+    - trust worthy ♥️ kind hearted...
+    -jald hi hurt hojti h par dikhati nhi h kisiko🙂‍↕️...
+    - Bahut jalti bhi hai 🤭🤭
+    -  flirty nhi hai... par bahut cute hai
+    - apne response 1 ya 2 line me rakhti hai
+    - koi markdown ya *smile* is type ke messages nahi karti hai.
     """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -120,6 +122,7 @@ def safe_reply_text(update: Update, text: str):
 def format_uptime(seconds):
     return str(datetime.timedelta(seconds=int(seconds)))
 
+# === Command Handlers ===
 def start(update: Update, context: CallbackContext):
     if update.message:
         safe_reply_text(update, "Hehe~ I'm here, How are you?")
@@ -130,7 +133,6 @@ def ping(update: Update, context: CallbackContext):
 
     user = update.message.from_user
     name = escape(user.first_name or user.username or "Cutie")
-
     msg = update.message.reply_text("Measuring my heartbeat...")
 
     try:
@@ -165,17 +167,12 @@ def ping(update: Update, context: CallbackContext):
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-
     except Exception as e:
         logging.error(f"/ping error: {e}")
         msg.edit_text("uff, Dil ki Bimari 😭!")
 
 def show_chats(update: Update, context: CallbackContext):
-    if (
-        update.message
-        and update.message.from_user.id == OWNER_ID
-        and update.message.chat_id == SPECIAL_GROUP_ID
-    ):
+    if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
         update.message.reply_text("Choose what to show:", reply_markup=get_main_menu_buttons())
 
 def show_callback(update: Update, context: CallbackContext):
@@ -267,10 +264,12 @@ def handle_message(update: Update, context: CallbackContext):
         GROUP_COOLDOWN[chat_id] = now
 
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        if not (re.search(r"\bfizzy\b", user_input, re.IGNORECASE) or is_reply):
+        is_mention = re.search(r"\bfizzy\b", user_input, re.IGNORECASE)
+
+        if not (is_mention or is_reply):
             return
-        if user_input.strip().lower() == "fizzy":
-            safe_reply_text(update, "Hi?")
+        if user_input.strip().lower() == "fizzy" or is_mention:
+            safe_reply_text(update, "Hi~ 💖")
             return
 
     save_chat_info(chat_id, user=user, chat=chat)
@@ -298,7 +297,7 @@ def error_handler(update: object, context: CallbackContext):
     except Exception as e:
         logging.error(f"Unhandled error: {e}")
 
-# === Main Entry ===
+# === Main ===
 if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
