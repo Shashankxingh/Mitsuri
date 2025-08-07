@@ -70,12 +70,6 @@ def save_chat_info(chat_id, user=None, chat=None):
 def get_all_chat_ids():
     return [chat["chat_id"] for chat in chat_info_collection.find()]
 
-def send_typing(update: Update, context: CallbackContext):
-    try:
-        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception as e:
-        logging.warning(f"Typing animation failed: {e}")
-
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
 - Tum Mitsuri Kanroji ho demon slayer wali
@@ -204,7 +198,13 @@ def show_callback(update: Update, context: CallbackContext):
             adder_id = group.get("user_id")
             adder_name = escape(group.get("name", "Unknown"))
             adder_link = f"<a href='tg://user?id={adder_id}'>{adder_name}</a>" if adder_id else adder_name
-            group_link = f"https://t.me/c/{str(gid)[4:]}" if str(gid).startswith("-100") else "N/A"
+            
+            # === Corrected "Open Group" link logic ===
+            group_link = "N/A"
+            if str(gid).startswith("-100"):
+                short_gid = str(gid)[4:]
+                group_link = f"https://t.me/c/{short_gid}"
+            
             lines.append(
                 f"• <b>{title}</b>\n"
                 f"  ID: <code>{gid}</code>\n"
@@ -254,13 +254,13 @@ def handle_message(update: Update, context: CallbackContext):
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 10:
             return
         GROUP_COOLDOWN[chat_id] = now
-
+        
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        is_mention = re.search(r"\\bmitsuri\\b", user_input, re.IGNORECASE)
-
+        is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
+        
         if not (is_mention or is_reply):
             return
-        if user_input.strip().lower() == "mitsuri" or is_mention:
+        if user_input.strip().lower() == context.bot.username.lower() or is_mention:
             safe_reply_text(update, "Yes?")
             return
 
@@ -271,11 +271,32 @@ def handle_message(update: Update, context: CallbackContext):
     if len(history) > 6:
         history = history[-6:]
     prompt = build_prompt(history, user_input, chosen_name)
-    send_typing(update, context)
+
+    # === Improved latency handling ===
+    try:
+        sent_message = update.message.reply_text("Thinking...")
+    except (Unauthorized, BadRequest) as e:
+        logging.warning(f"Failed to send 'Thinking...' message: {e}")
+        sent_message = None
+
     reply = generate_with_retry(prompt)
     history.append(("bot", reply))
     context.chat_data["history"] = history
-    safe_reply_text(update, reply)
+    
+    if sent_message:
+        try:
+            context.bot.edit_message_text(
+                chat_id=sent_message.chat_id,
+                message_id=sent_message.message_id,
+                text=reply,
+                parse_mode="HTML"
+            )
+        except (Unauthorized, BadRequest) as e:
+            logging.warning(f"Failed to edit message, sending new message instead: {e}")
+            safe_reply_text(update, reply)
+    else:
+        safe_reply_text(update, reply)
+    # === End improved latency handling ===
 
 def error_handler(update: object, context: CallbackContext):
     logging.error(f"Update: {update}")
