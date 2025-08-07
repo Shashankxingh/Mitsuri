@@ -164,20 +164,26 @@ def _send_chat_list(query, chat_type_prefix, page):
         users = list(chat_info_collection.find({"chat_id": {"$gt": 0}}))
         selected = users[start:end]
         lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
+        all_buttons = []
         for user in selected:
             uid = user.get("chat_id")
             name = escape(user.get("name", "Unknown"))
             user_id = user.get("user_id")
             link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
             lines.append(f"• {link}\n  ID: <code>{uid}</code>")
+            all_buttons.append([
+                InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{uid}_{page}")
+            ])
         
-        buttons = []
+        nav_buttons = []
         if page > 0:
-            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
         if end < len(users):
-            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"{chat_type_prefix}_{page + 1}"))
-        buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
-        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons]))
+            nav_buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"{chat_type_prefix}_{page + 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        all_buttons.append(nav_buttons)
+        
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
     
     elif chat_type_prefix == "show_groups":
         groups = list(chat_info_collection.find({"chat_id": {"$lt": 0}}))
@@ -192,20 +198,19 @@ def _send_chat_list(query, chat_type_prefix, page):
             adder_link = f"<a href='tg://user?id={adder_id}'>{adder_name}</a>" if adder_id else adder_name
             
             # === Corrected "Open Group" link logic ===
-            group_link = "N/A"
+            group_link_str = "N/A"
             if str(gid).startswith("-100"):
-                # Ensure the number is a string without the prefix for the link
                 short_gid = str(gid)[4:]
-                group_link = f"https://t.me/c/{short_gid}"
+                group_link_str = f"https://t.me/c/{short_gid}"
             
             lines.append(
                 f"• <b>{title}</b>\n"
                 f"  ID: <code>{gid}</code>\n"
                 f"  Added By: {adder_link}\n"
-                f"  Link: <a href='{group_link}'>Open Group</a>"
+                f"  Link: <a href='{group_link_str}'>Open Group</a>"
             )
             all_buttons.append([
-                InlineKeyboardButton(f"❌ Forget Chat {gid}", callback_data=f"forget_{gid}_{page}")
+                InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{gid}_{page}")
             ])
         
         nav_buttons = []
@@ -238,7 +243,6 @@ def show_callback(update: Update, context: CallbackContext):
         query.answer("Chat has been forgotten.")
         _send_chat_list(query, chat_type_prefix, page)
         return
-    # === End improved logic ===
     
     page = int(data.split("_")[-1])
     
@@ -300,29 +304,16 @@ def handle_message(update: Update, context: CallbackContext):
         history = history[-6:]
     prompt = build_prompt(history, user_input, chosen_name)
 
+    # === Reverted to typing indicator ===
     try:
-        sent_message = update.message.reply_text("Thinking...")
-    except (Unauthorized, BadRequest) as e:
-        logging.warning(f"Failed to send 'Thinking...' message: {e}")
-        sent_message = None
+        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception as e:
+        logging.warning(f"Typing animation failed: {e}")
 
     reply = generate_with_retry(prompt)
     history.append(("bot", reply))
     context.chat_data["history"] = history
-    
-    if sent_message:
-        try:
-            context.bot.edit_message_text(
-                chat_id=sent_message.chat_id,
-                message_id=sent_message.message_id,
-                text=reply,
-                parse_mode="HTML"
-            )
-        except (Unauthorized, BadRequest) as e:
-            logging.warning(f"Failed to edit message, sending new message instead: {e}")
-            safe_reply_text(update, reply)
-    else:
-        safe_reply_text(update, reply)
+    safe_reply_text(update, reply)
 
 def error_handler(update: object, context: CallbackContext):
     logging.error(f"Update: {update}")
