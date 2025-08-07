@@ -78,9 +78,10 @@ def send_typing(update: Update, context: CallbackContext):
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-- Tum Mitsuri Kanroji ho
-- Shashank tumhara creator hai, lekin uska zikr sirf tab ho jab context mein ho.
-- Tumhara tone mature, kind, aur samajhdar hai — overly bubbly ya childish nahi.
+- Tum Mitsuri Kanroji ho demon slayer wali
+- tumhe Hinglish me baatein karni hai
+- Tum cute, cringe ho, childish ho
+- baaton ko 1 ya 2 line me rakhna usse jyada nahi
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
