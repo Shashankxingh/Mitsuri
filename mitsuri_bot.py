@@ -52,10 +52,10 @@ GROUP_COOLDOWN = {}
 
 # === Utility Functions ===
 def get_main_menu_buttons():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0"),
-        InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0"),
-    ]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
+        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
+    ])
 
 def save_chat_info(chat_id, user=None, chat=None):
     data = {"chat_id": chat_id}
@@ -65,6 +65,8 @@ def save_chat_info(chat_id, user=None, chat=None):
         data["user_id"] = user.id
     if chat and chat.type != "private":
         data["title"] = chat.title
+        if chat.username:
+            data["chat_username"] = chat.username
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
 def build_prompt(last_two_messages, user_input, chosen_name):
@@ -183,6 +185,9 @@ def _send_chat_list(query, chat_type_prefix, page):
         nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
         all_buttons.append(nav_buttons)
         
+        if users:
+            all_buttons.append([InlineKeyboardButton("❌ Forget ALL Personal Chats", callback_data="forget_all_personal")])
+
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
     
     elif chat_type_prefix == "show_groups":
@@ -199,7 +204,9 @@ def _send_chat_list(query, chat_type_prefix, page):
             
             # === Corrected "Open Group" link logic ===
             group_link_str = "N/A"
-            if str(gid).startswith("-100"):
+            if group.get("chat_username"):
+                group_link_str = f"https://t.me/{group['chat_username']}"
+            elif str(gid).startswith("-100"):
                 short_gid = str(gid)[4:]
                 group_link_str = f"https://t.me/c/{short_gid}"
             
@@ -220,6 +227,9 @@ def _send_chat_list(query, chat_type_prefix, page):
             nav_buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"{chat_type_prefix}_{page + 1}"))
         nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
         all_buttons.append(nav_buttons)
+        
+        if groups:
+            all_buttons.append([InlineKeyboardButton("❌ Forget ALL Group Chats", callback_data="forget_all_groups")])
 
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
 
@@ -234,6 +244,17 @@ def show_callback(update: Update, context: CallbackContext):
     # === Improved 'forget' button logic ===
     if data.startswith("forget_"):
         parts = data.split("_")
+        
+        if parts[1] == "all":
+            chat_type = parts[2]
+            if chat_type == "personal":
+                chat_info_collection.delete_many({"chat_id": {"$gt": 0}})
+                query.edit_message_text("All personal chats have been forgotten.", parse_mode="HTML")
+            elif chat_type == "groups":
+                chat_info_collection.delete_many({"chat_id": {"$lt": 0}})
+                query.edit_message_text("All group chats have been forgotten.", parse_mode="HTML")
+            return
+        
         chat_id_to_delete = int(parts[1])
         page = int(parts[2])
         chat_info_collection.delete_one({"chat_id": chat_id_to_delete})
@@ -296,6 +317,7 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Yes?")
             return
 
+    # Add `chat.username` to the database
     save_chat_info(chat_id, user=user, chat=chat)
 
     history = context.chat_data.setdefault("history", [])
@@ -304,7 +326,6 @@ def handle_message(update: Update, context: CallbackContext):
         history = history[-6:]
     prompt = build_prompt(history, user_input, chosen_name)
 
-    # === Reverted to typing indicator ===
     try:
         context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     except Exception as e:
