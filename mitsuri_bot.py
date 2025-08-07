@@ -27,7 +27,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # === Owner and group IDs ===
 OWNER_ID = 8162412883
-SPECIAL_GROUP_ID = -4828682727
+SPECIAL_GROUP_ID = -1002759296936  # ✅ Use full supergroup ID
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 
 # === Constants ===
-REQUEST_DELAY = 10
+REQUEST_DELAY = 2  # Reduced for faster retry
 BOT_START_TIME = time.time()
 GROUP_COOLDOWN = {}
 
@@ -93,10 +93,14 @@ def build_prompt(last_two_messages, user_input, chosen_name):
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
+def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
     for attempt in range(retries):
         try:
+            start = time.time()
             response = model.generate_content(prompt)
+            duration = time.time() - start
+            logging.info(f"Gemini response time: {round(duration, 2)}s")
+
             if response is None:
                 return "I'm not sure how to respond to that right now."
             response_text = getattr(response, "text", None)
@@ -124,26 +128,17 @@ def start(update: Update, context: CallbackContext):
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
-
     user = update.message.from_user
     name = escape(user.first_name or user.username or "User")
     msg = update.message.reply_text("Checking latency...")
 
     try:
-        for countdown in range(5, 0, -1):
-            context.bot.edit_message_text(
-                chat_id=msg.chat_id,
-                message_id=msg.message_id,
-                text=f"Measuring latency...\n⏳ {countdown}s...",
-            )
-            time.sleep(1)
-
         start_api_time = time.time()
         gemini_reply = model.generate_content("Just say pong.").text.strip()
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
-
         group_link = "https://t.me/mitsuri_homie"
+
         reply = (
             f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>\n"
@@ -238,7 +233,10 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
             msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> removed Mitsuri from <b>{escape(chat.title)}</b>."
         else:
             return
-        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
+        try:
+            context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
+        except BadRequest as e:
+            logging.warning(f"Failed to log group event: {e}")
 
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
@@ -258,7 +256,7 @@ def handle_message(update: Update, context: CallbackContext):
         GROUP_COOLDOWN[chat_id] = now
 
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        is_mention = re.search(r"\bmitsuri\b", user_input, re.IGNORECASE)
+        is_mention = re.search(r"\\bmitsuri\\b", user_input, re.IGNORECASE)
 
         if not (is_mention or is_reply):
             return
