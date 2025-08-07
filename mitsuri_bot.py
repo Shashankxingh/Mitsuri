@@ -82,6 +82,7 @@ def build_prompt(last_two_messages, user_input, chosen_name):
 - tumhe Hinglish me baatein karni hai
 - Tum cute, cringe ho, childish ho
 - baaton ko 1 ya 2 line me rakhna usse jyada nahi
+- don't use actions like *giggles*, *blush* etc. instead use emojis
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -142,7 +143,7 @@ def ping(update: Update, context: CallbackContext):
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
-        group_link = "https://t.me/the_jellybeans"
+        group_link = "https://t.me/mitsuri_homie"
         reply = (
             f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>\n"
