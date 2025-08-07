@@ -155,45 +155,31 @@ def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
         update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
-def show_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    query.answer()
-    data = query.data
-
-    if data == "back_to_menu":
-        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
-    
-    # === New logic for 'forget' button ===
-    if data.startswith("forget_"):
-        chat_id_to_delete = int(data.split("_")[1])
-        chat_info_collection.delete_one({"chat_id": chat_id_to_delete})
-        query.edit_message_text(f"Chat with ID <code>{chat_id_to_delete}</code> has been forgotten.", parse_mode="HTML")
-        return
-    # === End new logic ===
-
-    page = int(data.split("_")[-1])
+# This helper function handles re-rendering the chat list
+def _send_chat_list(query, chat_type_prefix, page):
     start = page * 10
     end = start + 10
-
-    if data.startswith("show_personal_"):
+    
+    if chat_type_prefix == "show_personal":
         users = list(chat_info_collection.find({"chat_id": {"$gt": 0}}))
         selected = users[start:end]
         lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
-        buttons = []
         for user in selected:
             uid = user.get("chat_id")
             name = escape(user.get("name", "Unknown"))
             user_id = user.get("user_id")
             link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
             lines.append(f"• {link}\n  ID: <code>{uid}</code>")
+        
+        buttons = []
         if page > 0:
-            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_personal_{page - 1}"))
+            buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
         if end < len(users):
-            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_personal_{page + 1}"))
+            buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"{chat_type_prefix}_{page + 1}"))
         buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([buttons]))
-
-    elif data.startswith("show_groups_"):
+    
+    elif chat_type_prefix == "show_groups":
         groups = list(chat_info_collection.find({"chat_id": {"$lt": 0}}))
         selected = groups[start:end]
         lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
@@ -208,6 +194,7 @@ def show_callback(update: Update, context: CallbackContext):
             # === Corrected "Open Group" link logic ===
             group_link = "N/A"
             if str(gid).startswith("-100"):
+                # Ensure the number is a string without the prefix for the link
                 short_gid = str(gid)[4:]
                 group_link = f"https://t.me/c/{short_gid}"
             
@@ -217,22 +204,48 @@ def show_callback(update: Update, context: CallbackContext):
                 f"  Added By: {adder_link}\n"
                 f"  Link: <a href='{group_link}'>Open Group</a>"
             )
-            # === End corrected logic ===
-            
-            # === New 'Forget' button ===
             all_buttons.append([
-                InlineKeyboardButton(f"❌ Forget Chat {gid}", callback_data=f"forget_{gid}")
+                InlineKeyboardButton(f"❌ Forget Chat {gid}", callback_data=f"forget_{gid}_{page}")
             ])
         
         nav_buttons = []
         if page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"show_groups_{page - 1}"))
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
         if end < len(groups):
-            nav_buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"show_groups_{page + 1}"))
+            nav_buttons.append(InlineKeyboardButton("▶️ Next", callback_data=f"{chat_type_prefix}_{page + 1}"))
         nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
         all_buttons.append(nav_buttons)
 
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
+
+def show_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    data = query.data
+
+    if data == "back_to_menu":
+        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+    
+    # === Improved 'forget' button logic ===
+    if data.startswith("forget_"):
+        parts = data.split("_")
+        chat_id_to_delete = int(parts[1])
+        page = int(parts[2])
+        chat_info_collection.delete_one({"chat_id": chat_id_to_delete})
+        
+        # Determine the current chat type and re-render the list
+        chat_type_prefix = "show_groups" if chat_id_to_delete < 0 else "show_personal"
+        query.answer("Chat has been forgotten.")
+        _send_chat_list(query, chat_type_prefix, page)
+        return
+    # === End improved logic ===
+    
+    page = int(data.split("_")[-1])
+    
+    if data.startswith("show_personal_"):
+        _send_chat_list(query, "show_personal", page)
+    elif data.startswith("show_groups_"):
+        _send_chat_list(query, "show_groups", page)
 
 def track_bot_added_removed(update: Update, context: CallbackContext):
     cmu = update.my_chat_member
@@ -266,8 +279,7 @@ def handle_message(update: Update, context: CallbackContext):
 
     if chat_type in ["group", "supergroup"]:
         now = time.time()
-        # === Corrected cooldown logic ===
-        if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:  # Reduced cooldown to 5 seconds
+        if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:
             return
         GROUP_COOLDOWN[chat_id] = now
         
@@ -276,7 +288,6 @@ def handle_message(update: Update, context: CallbackContext):
         
         if not (is_mention or is_reply):
             return
-        # === End corrected cooldown logic ===
         if user_input.strip().lower() == context.bot.username.lower() or is_mention:
             safe_reply_text(update, "Yes?")
             return
