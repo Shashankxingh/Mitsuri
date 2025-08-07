@@ -26,8 +26,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 # === Owner and group IDs ===
-OWNER_ID = 7563434309
-SPECIAL_GROUP_ID = -1002453669999
+OWNER_ID = 8162412883
+SPECIAL_GROUP_ID = -4828682727
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -78,19 +78,17 @@ def send_typing(update: Update, context: CallbackContext):
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-   - Tum Faiza Malik ho
-   - Nickname Fizzy hai
-   - baatein Chhoti chhoti hoti hai par cute hoti hai
-   - Shashank tumhara owner hai par uska naam sirf tab Lena jab uski baatein ho rahi hongi.
-
-    """
+- Tum Mitsuri Kanroji ho
+- Shashank tumhara creator hai, lekin uska zikr sirf tab ho jab context mein ho.
+- Tumhara tone mature, kind, aur samajhdar hai — overly bubbly ya childish nahi.
+"""
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
             prompt += f"{msg}\n"
-    prompt += f"Human ({chosen_name}): {user_input}\nFizzy:"
+    prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
 def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
@@ -98,14 +96,14 @@ def generate_with_retry(prompt, retries=3, delay=REQUEST_DELAY):
         try:
             response = model.generate_content(prompt)
             if response is None:
-                return "Mai to mar gayi😭!"
+                return "I'm not sure how to respond to that right now."
             response_text = getattr(response, "text", None)
-            return response_text.strip() if response_text else "Oops...!"
+            return response_text.strip() if response_text else "Something went wrong..."
         except Exception as e:
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    return "sleeping!"
+    return "I'm having trouble responding at the moment."
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -119,39 +117,39 @@ def format_uptime(seconds):
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
     if update.message:
-        safe_reply_text(update, "Hehe~ I'm here, How are you?")
+        safe_reply_text(update, "Hello. Mitsuri is here. How can I help you today?")
 
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
 
     user = update.message.from_user
-    name = escape(user.first_name or user.username or "Cutie")
-    msg = update.message.reply_text("Measuring my heartbeat...")
+    name = escape(user.first_name or user.username or "User")
+    msg = update.message.reply_text("Checking latency...")
 
     try:
         for countdown in range(5, 0, -1):
             context.bot.edit_message_text(
                 chat_id=msg.chat_id,
                 message_id=msg.message_id,
-                text=f"Measuring my heartbeat...\n⏳ {countdown}s remaining...",
+                text=f"Measuring latency...\n⏳ {countdown}s...",
             )
             time.sleep(1)
 
         start_api_time = time.time()
-        gemini_reply = model.generate_content("Just say pong!").text.strip()
+        gemini_reply = model.generate_content("Just say pong.").text.strip()
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
         group_link = "https://t.me/the_jellybeans"
         reply = (
-            f"╭───[ 🩷 <b>Fizzy Ping Report</b> ]───\n"
-            f"├ Hello <b>{name}</b>, senpai~\n"
-            f"├ My_Home: <a href='{group_link}'>@the_jellybeans</a>\n"
+            f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
+            f"├ Hello <b>{name}</b>\n"
+            f"├ Group: <a href='{group_link}'>@the_jellybeans</a>\n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
-            f"├ Bot Uptime: <b>{uptime}</b>\n"
-            f"╰⏱️ Ping stable, ready to fight again😏."
+            f"├ Uptime: <b>{uptime}</b>\n"
+            f"╰─ I'm here and responsive."
         )
 
         context.bot.edit_message_text(
@@ -163,11 +161,11 @@ def ping(update: Update, context: CallbackContext):
         )
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("uff, Dil ki Bimari 😭!")
+        msg.edit_text("Something went wrong while checking ping.")
 
 def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
-        update.message.reply_text("Choose what to show:", reply_markup=get_main_menu_buttons())
+        update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
 def show_callback(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -175,7 +173,7 @@ def show_callback(update: Update, context: CallbackContext):
     data = query.data
 
     if data == "back_to_menu":
-        return query.edit_message_text("Choose what to show:", reply_markup=get_main_menu_buttons())
+        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
     page = int(data.split("_")[-1])
     start = page * 10
@@ -232,10 +230,10 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
         user = cmu.from_user
         chat = cmu.chat
         if old in ["left", "kicked"] and new in ["member", "administrator"]:
-            msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> added me to <b>{escape(chat.title)}</b>."
+            msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> added Mitsuri to <b>{escape(chat.title)}</b>."
             save_chat_info(chat.id, user=user, chat=chat)
         elif new in ["left", "kicked"]:
-            msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> removed me from <b>{escape(chat.title)}</b>."
+            msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> removed Mitsuri from <b>{escape(chat.title)}</b>."
         else:
             return
         context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
@@ -258,12 +256,12 @@ def handle_message(update: Update, context: CallbackContext):
         GROUP_COOLDOWN[chat_id] = now
 
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        is_mention = re.search(r"\bfizzy\b", user_input, re.IGNORECASE)
+        is_mention = re.search(r"\bmitsuri\b", user_input, re.IGNORECASE)
 
         if not (is_mention or is_reply):
             return
-        if user_input.strip().lower() == "fizzy" or is_mention:
-            safe_reply_text(update, "Hi~ 💖")
+        if user_input.strip().lower() == "mitsuri" or is_mention:
+            safe_reply_text(update, "Yes?")
             return
 
     save_chat_info(chat_id, user=user, chat=chat)
