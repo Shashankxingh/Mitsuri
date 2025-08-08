@@ -69,20 +69,22 @@ def save_chat_info(chat_id, user=None, chat=None):
             data["chat_username"] = chat.username
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
+# --- MODIFIED: The prompt now is more "Hinglish" and in character ---
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
-- Tum Mitsuri Kanroji ho demon slayer wali
-- tumhe Hinglish me baatein karni hai
-- Tum cute, cringe ho, childish ho
-- baaton ko 1 ya 2 line me rakhna usse jyada nahi
-- don't use actions like *giggles*, *blush* etc. instead use emojis
+- Tum Mitsuri Kanroji ho, Demon Slayer anime se.
+- Tumhe Hinglish mein baat karni hai, jaise "Hello, kaise ho?"
+- Tum bohot cute, thodi cringe, aur childish personality rakhti ho.
+- Har baat ko ek ya do line mein hi bolna, zyada lamba nahi.
+- Actions jaise *giggles* ya *blush* nahi, uske badle emojis use karo.
+- Koshish karna ki tumhari baaton mein thodi sweetness aur cuteness ho 🥰
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"{msg}\n"
+            prompt += f"Mitsuri: {msg}\n"
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
@@ -95,14 +97,14 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             logging.info(f"Gemini response time: {round(duration, 2)}s")
 
             if response is None:
-                return "I'm not sure how to respond to that right now."
+                return "Mujhe samajh nahi aaya... 🥺"
             response_text = getattr(response, "text", None)
-            return response_text.strip() if response_text else "Something went wrong..."
+            return response_text.strip() if response_text else "Kuch gadbad ho gayi... 😞"
         except Exception as e:
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
-    return "I'm having trouble responding at the moment."
+    return "Abhi main thoda busy hu... baad mein baat karte hain! 😊"
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -157,7 +159,6 @@ def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
         update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
-# This helper function handles re-rendering the chat list
 def _send_chat_list(query, chat_type_prefix, page):
     start = page * 10
     end = start + 10
@@ -202,7 +203,6 @@ def _send_chat_list(query, chat_type_prefix, page):
             adder_name = escape(group.get("name", "Unknown"))
             adder_link = f"<a href='tg://user?id={adder_id}'>{adder_name}</a>" if adder_id else adder_name
             
-            # === Corrected "Open Group" link logic ===
             group_link_str = "N/A"
             if group.get("chat_username"):
                 group_link_str = f"https://t.me/{group['chat_username']}"
@@ -241,7 +241,6 @@ def show_callback(update: Update, context: CallbackContext):
     if data == "back_to_menu":
         return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
     
-    # === Improved 'forget' button logic ===
     if data.startswith("forget_"):
         parts = data.split("_")
         
@@ -259,7 +258,6 @@ def show_callback(update: Update, context: CallbackContext):
         page = int(parts[2])
         chat_info_collection.delete_one({"chat_id": chat_id_to_delete})
         
-        # Determine the current chat type and re-render the list
         chat_type_prefix = "show_groups" if chat_id_to_delete < 0 else "show_personal"
         query.answer("Chat has been forgotten.")
         _send_chat_list(query, chat_type_prefix, page)
@@ -291,6 +289,63 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
         except BadRequest as e:
             logging.warning(f"Failed to log group event: {e}")
 
+# --- NEW: Handler for "mitsuri" in group chats ---
+def mitsuri_hi(update: Update, context: CallbackContext):
+    if not update.message or not update.message.text:
+        return
+    
+    # Check if the message is in a group and is not a command
+    if update.message.chat.type in ["group", "supergroup"] and not update.message.text.startswith('/'):
+        # Normalize the message text for comparison
+        message_text = update.message.text.strip().lower()
+        if message_text == "mitsuri":
+            update.message.reply_text("Hii!")
+
+def eval_command(update: Update, context: CallbackContext):
+    """Executes a Python expression provided by the owner."""
+    if not update.message:
+        return
+
+    if update.message.from_user.id != OWNER_ID:
+        update.message.reply_text("You are not authorized to use this command.")
+        return
+
+    if not context.args:
+        update.message.reply_text("Please provide a code snippet to evaluate.")
+        return
+
+    code_to_eval = " ".join(context.args)
+
+    try:
+        locs = locals()
+        globs = globals()
+
+        import io
+        import sys
+        
+        old_stdout = sys.stdout
+        redirected_output = io.StringIO()
+        sys.stdout = redirected_output
+
+        exec(code_to_eval, globs, locs)
+        
+        sys.stdout = old_stdout
+        output = redirected_output.getvalue()
+
+        if not output and " " not in code_to_eval:
+            output = str(eval(code_to_eval, globs, locs))
+        
+        if len(output) > 2000:
+            output = output[:1900] + "\n... (output truncated)"
+        
+        reply_text = f"✅ <b>Output:</b>\n<pre>{escape(output)}</pre>" if output.strip() else "✅ <b>Success. No output.</b>"
+        update.message.reply_text(reply_text, parse_mode="HTML")
+
+    except Exception as e:
+        error_text = f"❌ <b>Error:</b>\n<pre>{escape(str(e))}</pre>"
+        update.message.reply_text(error_text, parse_mode="HTML")
+
+# --- MODIFIED: Ensure new handlers don't conflict with main handler ---
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
@@ -301,6 +356,10 @@ def handle_message(update: Update, context: CallbackContext):
     chat_id = chat.id
     chat_type = chat.type
     chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
+
+    # Don't proceed if the message is just "mitsuri" (handled by the new handler)
+    if chat_type in ["group", "supergroup"] and user_input.lower() == "mitsuri":
+        return
 
     if chat_type in ["group", "supergroup"]:
         now = time.time()
@@ -317,7 +376,6 @@ def handle_message(update: Update, context: CallbackContext):
             safe_reply_text(update, "Yes?")
             return
 
-    # Add `chat.username` to the database
     save_chat_info(chat_id, user=user, chat=chat)
 
     history = context.chat_data.setdefault("history", [])
@@ -356,6 +414,13 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("show", show_chats))
+    dp.add_handler(CommandHandler("eval", eval_command))
+    
+    # --- ADD THE NEW "mitsuri" HANDLER BEFORE the main message handler ---
+    # The order of handlers is important. This one should be first so it
+    # catches the specific message before the generic one.
+    dp.add_handler(MessageHandler(Filters.regex(r"^[Mm]itsuri$") & Filters.chat_type.group, mitsuri_hi))
+
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
     dp.add_handler(CallbackQueryHandler(show_callback))
