@@ -159,6 +159,7 @@ def show_chats(update: Update, context: CallbackContext):
     if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
         update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
+# --- MODIFIED: This function now handles Block/Unblock buttons ---
 def _send_chat_list(query, chat_type_prefix, page):
     start = page * 10
     end = start + 10
@@ -173,10 +174,15 @@ def _send_chat_list(query, chat_type_prefix, page):
             name = escape(user.get("name", "Unknown"))
             user_id = user.get("user_id")
             link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
+            # Check if the user is currently blocked
+            is_blocked = user.get("is_blocked", False)
             lines.append(f"• {link}\n  ID: <code>{uid}</code>")
-            all_buttons.append([
-                InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{uid}_{page}")
-            ])
+            
+            # Show Block or Unblock button based on the status
+            if is_blocked:
+                all_buttons.append([InlineKeyboardButton(f"✅ Unblock {name}", callback_data=f"unblock_{uid}_{page}")])
+            else:
+                all_buttons.append([InlineKeyboardButton(f"🚫 Block {name}", callback_data=f"block_{uid}_{page}")])
         
         nav_buttons = []
         if page > 0:
@@ -233,6 +239,7 @@ def _send_chat_list(query, chat_type_prefix, page):
 
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
 
+# --- MODIFIED: This function now handles Block, Unblock, and leaving groups ---
 def show_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     query.answer()
@@ -250,17 +257,50 @@ def show_callback(update: Update, context: CallbackContext):
                 chat_info_collection.delete_many({"chat_id": {"$gt": 0}})
                 query.edit_message_text("All personal chats have been forgotten.", parse_mode="HTML")
             elif chat_type == "groups":
+                group_chats = list(chat_info_collection.find({"chat_id": {"$lt": 0}}))
+                for group in group_chats:
+                    try:
+                        context.bot.leave_chat(chat_id=group["chat_id"])
+                    except Exception as e:
+                        logging.error(f"Failed to leave chat {group['chat_id']}: {e}")
                 chat_info_collection.delete_many({"chat_id": {"$lt": 0}})
-                query.edit_message_text("All group chats have been forgotten.", parse_mode="HTML")
+                query.edit_message_text("All group chats have been forgotten and left.", parse_mode="HTML")
             return
         
         chat_id_to_delete = int(parts[1])
         page = int(parts[2])
+
+        # Check if it's a group chat and leave it
+        if chat_id_to_delete < 0:
+            try:
+                context.bot.leave_chat(chat_id=chat_id_to_delete)
+                query.answer("Chat has been forgotten and left.")
+            except Exception as e:
+                logging.error(f"Failed to leave chat {chat_id_to_delete}: {e}")
+                query.answer("Failed to leave the chat, but data was forgotten.")
+        else:
+            query.answer("Chat has been forgotten.")
+            
         chat_info_collection.delete_one({"chat_id": chat_id_to_delete})
         
         chat_type_prefix = "show_groups" if chat_id_to_delete < 0 else "show_personal"
-        query.answer("Chat has been forgotten.")
+        
         _send_chat_list(query, chat_type_prefix, page)
+        return
+    
+    # --- NEW: Handle block and unblock actions ---
+    if data.startswith("block_") or data.startswith("unblock_"):
+        parts = data.split("_")
+        action = parts[0] # "block" or "unblock"
+        chat_id_to_update = int(parts[1])
+        page = int(parts[2])
+
+        is_blocked = True if action == "block" else False
+        
+        chat_info_collection.update_one({"chat_id": chat_id_to_update}, {"$set": {"is_blocked": is_blocked}})
+
+        query.answer(f"User has been {'blocked' if is_blocked else 'unblocked'}.")
+        _send_chat_list(query, "show_personal", page)
         return
     
     page = int(data.split("_")[-1])
@@ -357,6 +397,12 @@ def handle_message(update: Update, context: CallbackContext):
     chat_type = chat.type
     chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
+    # --- NEW: Check if the user is blocked before processing any message
+    user_info = chat_info_collection.find_one({"user_id": user.id})
+    if user_info and user_info.get("is_blocked"):
+        logging.info(f"Ignoring message from blocked user {user.id}")
+        return
+
     # Don't proceed if the message is just "mitsuri" (handled by the new handler)
     if chat_type in ["group", "supergroup"] and user_input.lower() == "mitsuri":
         return
@@ -370,11 +416,20 @@ def handle_message(update: Update, context: CallbackContext):
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
         is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
         
-        if not (is_mention or is_reply):
+        # --- NEW: Check if the message starts with "mitsuri " (case-insensitive)
+        starts_with_mitsuri = user_input.lower().startswith("mitsuri ")
+        
+        if not (is_mention or is_reply or starts_with_mitsuri):
             return
-        if user_input.strip().lower() == context.bot.username.lower() or is_mention:
+        
+        # --- MODIFIED: Also check if the message is only the mention and not "mitsuri word"
+        if (user_input.strip().lower() == context.bot.username.lower() or is_mention) and not starts_with_mitsuri:
             safe_reply_text(update, "Yes?")
             return
+        
+        # --- NEW: Remove "mitsuri" from the user input before processing
+        if starts_with_mitsuri:
+            user_input = user_input[len("mitsuri "):].strip()
 
     save_chat_info(chat_id, user=user, chat=chat)
 
