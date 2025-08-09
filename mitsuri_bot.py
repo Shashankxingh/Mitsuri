@@ -27,7 +27,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # === Owner and group IDs ===
 OWNER_ID = 8162412883
-SPECIAL_GROUP_ID = -1002759296936  # ✅ Use full supergroup ID
+SPECIAL_GROUP_ID = -1002759296936
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -69,7 +69,6 @@ def save_chat_info(chat_id, user=None, chat=None):
             data["chat_username"] = chat.username
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-# --- MODIFIED: The prompt now is more "Hinglish" and in character ---
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
 - Tum Mitsuri Kanroji ho, Demon Slayer anime se.
@@ -156,10 +155,9 @@ def ping(update: Update, context: CallbackContext):
         msg.edit_text("Something went wrong while checking ping.")
 
 def show_chats(update: Update, context: CallbackContext):
-    if update.message and update.message.from_user.id == OWNER_ID and update.message.chat_id == SPECIAL_GROUP_ID:
+    if update.message and update.message.from_user.id == OWNER_ID:
         update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
-# --- MODIFIED: This function now handles Block/Unblock buttons ---
 def _send_chat_list(query, chat_type_prefix, page):
     start = page * 10
     end = start + 10
@@ -174,11 +172,9 @@ def _send_chat_list(query, chat_type_prefix, page):
             name = escape(user.get("name", "Unknown"))
             user_id = user.get("user_id")
             link = f"<a href='tg://user?id={user_id}'>{name}</a>" if user_id else name
-            # Check if the user is currently blocked
             is_blocked = user.get("is_blocked", False)
             lines.append(f"• {link}\n  ID: <code>{uid}</code>")
             
-            # Show Block or Unblock button based on the status
             if is_blocked:
                 all_buttons.append([InlineKeyboardButton(f"✅ Unblock {name}", callback_data=f"unblock_{uid}_{page}")])
             else:
@@ -239,9 +235,13 @@ def _send_chat_list(query, chat_type_prefix, page):
 
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
 
-# --- MODIFIED: This function now handles Block, Unblock, and leaving groups ---
 def show_callback(update: Update, context: CallbackContext):
     query = update.callback_query
+    
+    if query.from_user.id != OWNER_ID:
+        query.answer("You are not authorized to use this.")
+        return
+
     query.answer()
     data = query.data
 
@@ -270,7 +270,6 @@ def show_callback(update: Update, context: CallbackContext):
         chat_id_to_delete = int(parts[1])
         page = int(parts[2])
 
-        # Check if it's a group chat and leave it
         if chat_id_to_delete < 0:
             try:
                 context.bot.leave_chat(chat_id=chat_id_to_delete)
@@ -288,14 +287,13 @@ def show_callback(update: Update, context: CallbackContext):
         _send_chat_list(query, chat_type_prefix, page)
         return
     
-    # --- NEW: Handle block and unblock actions ---
     if data.startswith("block_") or data.startswith("unblock_"):
         parts = data.split("_")
-        action = parts[0] # "block" or "unblock"
+        action = parts[0]
         chat_id_to_update = int(parts[1])
         page = int(parts[2])
 
-        is_blocked = True if action == "block" else False
+        is_blocked = (action == "block")
         
         chat_info_collection.update_one({"chat_id": chat_id_to_update}, {"$set": {"is_blocked": is_blocked}})
 
@@ -329,14 +327,11 @@ def track_bot_added_removed(update: Update, context: CallbackContext):
         except BadRequest as e:
             logging.warning(f"Failed to log group event: {e}")
 
-# --- NEW: Handler for "mitsuri" in group chats ---
 def mitsuri_hi(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
     
-    # Check if the message is in a group and is not a command
     if update.message.chat.type in ["group", "supergroup"] and not update.message.text.startswith('/'):
-        # Normalize the message text for comparison
         message_text = update.message.text.strip().lower()
         if message_text == "mitsuri":
             update.message.reply_text("Hii!")
@@ -385,7 +380,6 @@ def eval_command(update: Update, context: CallbackContext):
         error_text = f"❌ <b>Error:</b>\n<pre>{escape(str(e))}</pre>"
         update.message.reply_text(error_text, parse_mode="HTML")
 
-# --- MODIFIED: Ensure new handlers don't conflict with main handler ---
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
@@ -397,40 +391,37 @@ def handle_message(update: Update, context: CallbackContext):
     chat_type = chat.type
     chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
-    # --- NEW: Check if the user is blocked before processing any message
     user_info = chat_info_collection.find_one({"user_id": user.id})
     if user_info and user_info.get("is_blocked"):
         logging.info(f"Ignoring message from blocked user {user.id}")
         return
 
-    # Don't proceed if the message is just "mitsuri" (handled by the new handler)
-    if chat_type in ["group", "supergroup"] and user_input.lower() == "mitsuri":
-        return
-
     if chat_type in ["group", "supergroup"]:
+        if user_input.lower() == "mitsuri":
+            return
+        
         now = time.time()
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:
             return
         GROUP_COOLDOWN[chat_id] = now
         
-        is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
         is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
-        
-        # --- NEW: Check if the message starts with "mitsuri " (case-insensitive)
-        starts_with_mitsuri = user_input.lower().startswith("mitsuri ")
-        
-        if not (is_mention or is_reply or starts_with_mitsuri):
-            return
-        
-        # --- MODIFIED: Also check if the message is only the mention and not "mitsuri word"
-        if (user_input.strip().lower() == context.bot.username.lower() or is_mention) and not starts_with_mitsuri:
-            safe_reply_text(update, "Yes?")
-            return
-        
-        # --- NEW: Remove "mitsuri" from the user input before processing
-        if starts_with_mitsuri:
-            user_input = user_input[len("mitsuri "):].strip()
+        is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        mitsuri_pattern = re.compile(r'\b[Mm]itsuri\b')
+        is_name_mentioned = mitsuri_pattern.search(user_input)
 
+        if not (is_mention or is_reply or is_name_mentioned):
+            return
+
+        if is_mention:
+            user_input = re.sub(r'\@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
+        
+        if is_name_mentioned:
+            user_input = mitsuri_pattern.sub('', user_input).strip()
+        
+        if not user_input:
+            return
+    
     save_chat_info(chat_id, user=user, chat=chat)
 
     history = context.chat_data.setdefault("history", [])
@@ -471,12 +462,14 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("show", show_chats))
     dp.add_handler(CommandHandler("eval", eval_command))
     
-    # --- ADD THE NEW "mitsuri" HANDLER BEFORE the main message handler ---
-    # The order of handlers is important. This one should be first so it
-    # catches the specific message before the generic one.
     dp.add_handler(MessageHandler(Filters.regex(r"^[Mm]itsuri$") & Filters.chat_type.group, mitsuri_hi))
+    
+    dp.add_handler(MessageHandler(
+        (Filters.text & ~Filters.command & Filters.chat_type.group & (Filters.reply | Filters.entity("mention") | Filters.regex(r"\b[Mm]itsuri\b")))
+        | (Filters.text & ~Filters.command & Filters.chat_type.private),
+        handle_message
+    ))
 
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
     dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
     dp.add_handler(CallbackQueryHandler(show_callback))
     dp.add_error_handler(error_handler)
