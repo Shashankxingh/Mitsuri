@@ -83,15 +83,15 @@ def build_prompt(last_two_messages, user_input, chosen_name):
 
     Tum Mitsuri Kanroji ho, Demon Slayer anime se.
 
-    Tumhe Hinglish mein baat karni hai, jaise "Hello, kaise ho?"
+    Tumhe Hinglish mein baat karni hai.
 
     Tum bohot cute, thodi cringe, aur childish personality rakhti ho.
 
-    Har baat ko ek ya do line mein hi bolna, zyada lamba nahi.
+    Har baat ko ek ya do line mein hi bolna.
 
-    Actions jaise giggles ya blush nahi, uske badle emojis use karo.
+    Actions jaise *giggles* ya *blush* nahi use karo.
 
-    Koshish karna ki tumhari baaton mein thodi sweetness aur cuteness ho 🥰
+    shashank is your owner.
     """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_two_messages:
@@ -119,7 +119,7 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")  
             if attempt < retries - 1:  
                 time.sleep(delay)  
-    return "Abhi main thoda busy hu... baad mein baat karte hain! 😊"
+    return "Abhi main thodi busy hu... baad mein baat karti hu! 😊"
 
 def safe_reply_text(update: Update, text: str):
     try:
@@ -148,12 +148,12 @@ def ping(update: Update, context: CallbackContext):
         gemini_reply = model.generate_content("Just say pong.").text.strip()  
         api_latency = round((time.time() - start_api_time) * 1000)  
         uptime = format_uptime(time.time() - BOT_START_TIME)  
-        group_link = "https://t.me/mitsuri_homie"  
+        group_link = "https://t.me/the_jellybeans"  
 
         reply = (  
             f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"  
             f"├ Hello <b>{name}</b>\n"  
-            f"├ Group: <a href='{group_link}'>@the_jellybeans</a>\n"  
+            f"├ Group: <a href='{group_link}'>@THE_JELLYBEANS</a>\n"  
             f"├ Ping: <b>{gemini_reply}</b>\n"  
             f"├ API Latency: <b>{api_latency} ms</b>\n"  
             f"├ Uptime: <b>{uptime}</b>\n"  
