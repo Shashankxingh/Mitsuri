@@ -153,7 +153,7 @@ def ping(update: Update, context: CallbackContext):
         )
 
         context.bot.edit_message_text(
-            chat_id=msg.chat.id,   # fixed
+            chat_id=msg.chat.id,
             message_id=msg.message_id,
             text=reply,
             parse_mode="HTML",
@@ -163,16 +163,12 @@ def ping(update: Update, context: CallbackContext):
         logging.error(f"/ping error: {e}")
         msg.edit_text("Something went wrong while checking ping.")
 
-# (show_chats, _send_chat_list, show_callback, track_bot_added_removed stay the same)
-
 def mitsuri_hi(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
         return
     if update.message.chat.type in ["group", "supergroup"] and not update.message.text.startswith('/'):
         if update.message.text.strip().lower() == "mitsuri":
             update.message.reply_text("Hii!")
-
-# (eval_command unchanged)
 
 def handle_message(update: Update, context: CallbackContext):
     if not update.message or not update.message.text:
@@ -252,21 +248,20 @@ if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
+    # Commands
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
-    dp.add_handler(CommandHandler("show", show_chats))
-    dp.add_handler(CommandHandler("eval", eval_command))
 
-    dp.add_handler(MessageHandler(Filters.regex(r"^[Mm]itsuri$") & Filters.chat_type.group, mitsuri_hi))
+    # Group single "mitsuri"
+    dp.add_handler(MessageHandler(Filters.regex(r"^[Mm]itsuri$") & Filters.group, mitsuri_hi))
 
+    # Main conversation handler
     dp.add_handler(MessageHandler(
-        (Filters.text & ~Filters.command & Filters.chat_type.group & (Filters.reply | Filters.entity("mention") | Filters.regex(r"\b[Mm]itsuri\b")))
-        | (Filters.text & ~Filters.command & Filters.chat_type.private),
+        (Filters.text & ~Filters.command & Filters.group & (Filters.reply | Filters.entity("mention") | Filters.regex(r"\b[Mm]itsuri\b")))
+        | (Filters.text & ~Filters.command & Filters.private),
         handle_message
     ))
 
-    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
-    dp.add_handler(CallbackQueryHandler(show_callback))
     dp.add_error_handler(error_handler)
 
     updater.start_polling()
