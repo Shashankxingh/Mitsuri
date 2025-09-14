@@ -5,7 +5,7 @@ import logging
 import re
 from dotenv import load_dotenv
 from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -66,7 +66,7 @@ def build_prompt(last_messages, user_input, chosen_name):
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
-    """Robust wrapper for Gemini 2.5 Flash-Lite API."""
+    """Gemini 2.5 Flash-Lite wrapper with retry."""
     for attempt in range(retries):
         try:
             start = time.time()
@@ -154,6 +154,14 @@ def eval_code(update: Update, context: CallbackContext):
     except Exception as e:
         update.message.reply_text(f"❌ Error:\n<pre>{escape(str(e))}</pre>", parse_mode="HTML")
 
+def show(update: Update, context: CallbackContext):
+    history = context.chat_data.get("history", [])
+    if not history:
+        update.message.reply_text("No history yet 🌸")
+        return
+    formatted = "\n".join([f"{'👤' if r=='user' else '🌸'} {m}" for r, m in history])
+    update.message.reply_text(f"<b>History</b>\n\n{escape(formatted)}", parse_mode="HTML")
+
 # === Conversation Handling ===
 def handle_message(update: Update, context: CallbackContext):
     if not update.message:
@@ -207,14 +215,6 @@ def handle_message(update: Update, context: CallbackContext):
     context.chat_data["history"] = history
     safe_reply_text(update, reply)
 
-def show(update: Update, context: CallbackContext):
-    history = context.chat_data.get("history", [])
-    if not history:
-        update.message.reply_text("No history yet 🌸")
-        return
-    formatted = "\n".join([f"{'👤' if r=='user' else '🌸'} {m}" for r, m in history])
-    update.message.reply_text(f"<b>History</b>\n\n{escape(formatted)}", parse_mode="HTML")
-
 def error_handler(update: object, context: CallbackContext):
     logging.error(f"Update: {update}")
     logging.error(f"Context error: {context.error}")
@@ -232,4 +232,15 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("show", show))
-    dp.add_handler(CommandHandler("eval", eval_code, pass_args=True
+    dp.add_handler(CommandHandler("eval", eval_code, pass_args=True))
+
+    # Conversation handler (text + stickers)
+    dp.add_handler(MessageHandler(
+        (Filters.text | Filters.sticker) & ~Filters.command,
+        handle_message
+    ))
+
+    dp.add_error_handler(error_handler)
+
+    updater.start_polling()
+    updater.idle()
