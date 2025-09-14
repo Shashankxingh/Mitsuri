@@ -14,18 +14,15 @@ from telegram.ext import (
     CallbackContext,
 )
 from telegram.error import Unauthorized, BadRequest
-from pymongo import MongoClient
 import google.generativeai as genai
 
 # === Load environment variables ===
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
 
-# === Owner and group IDs ===
+# === Owner ID ===
 OWNER_ID = 8162412883
-SPECIAL_GROUP_ID = -1002759296936
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -37,13 +34,6 @@ model = genai.GenerativeModel(
         "top_p": 0.95,
     }
 )
-
-# === MongoDB setup ===
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["MitsuriDB"]
-chat_info_collection = db["chat_info"]
-history_collection = db["chat_history"]
-chat_info_collection.create_index("chat_id", unique=True)
 
 # === Logging setup ===
 logging.basicConfig(
@@ -57,34 +47,7 @@ BOT_START_TIME = time.time()
 GROUP_COOLDOWN = {}
 
 # === Utility Functions ===
-def save_chat_info(chat_id, user=None, chat=None):
-    data = {"chat_id": chat_id}
-    if user:
-        data["name"] = user.first_name
-        data["username"] = user.username
-        data["user_id"] = user.id
-    if chat and chat.type != "private":
-        data["title"] = chat.title
-        if chat.username:
-            data["chat_username"] = chat.username
-    chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
-
-def save_history(chat_id, role, msg, limit=20):
-    """Store only last `limit` messages per chat in Mongo"""
-    history_collection.update_one(
-        {"chat_id": chat_id},
-        {"$push": {"messages": {"role": role, "msg": msg}, "$slice": -limit}},
-        upsert=True,
-    )
-
-def load_history(chat_id, limit=6):
-    """Get last `limit` messages for context"""
-    doc = history_collection.find_one({"chat_id": chat_id})
-    if not doc or "messages" not in doc:
-        return []
-    return doc["messages"][-limit:]
-
-def build_prompt(last_two_messages, user_input, chosen_name):
+def build_prompt(last_messages, user_input, chosen_name):
     system_instructions = """
 - Tum Mitsuri Kanroji ho, Demon Slayer anime se.
 - Tumhe Hinglish mein baat karni hai, jaise "Hello, kaise ho?"
@@ -94,7 +57,7 @@ def build_prompt(last_two_messages, user_input, chosen_name):
 - Koshish karna ki tumhari baaton mein thodi sweetness aur cuteness ho 🥰
 """
     prompt = system_instructions.strip() + "\n\n"
-    for role, msg in last_two_messages:
+    for role, msg in last_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
@@ -112,7 +75,6 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             logging.info(f"Gemini response time: {round(duration, 2)}s")
 
             response_text = None
-
             if hasattr(response, "text") and response.text:
                 response_text = response.text
             elif hasattr(response, "candidates") and response.candidates:
@@ -159,12 +121,10 @@ def ping(update: Update, context: CallbackContext):
         gemini_reply = getattr(resp, "text", None) or "pong"
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
-        group_link = "https://t.me/mitsuri_homie"
 
         reply = (
             f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>\n"
-            f"├ Group: <a href='{group_link}'>@the_jellybeans</a>\n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Uptime: <b>{uptime}</b>\n"
@@ -181,18 +141,6 @@ def ping(update: Update, context: CallbackContext):
     except Exception as e:
         logging.error(f"/ping error: {e}")
         msg.edit_text("Something went wrong while checking ping.")
-
-def show(update: Update, context: CallbackContext):
-    chat_id = update.effective_chat.id
-    history = load_history(chat_id, limit=20)
-    if not history:
-        update.message.reply_text("No history yet 🌸")
-        return
-
-    formatted = "\n".join(
-        [f"{'👤' if h['role']=='user' else '🌸'} {h['msg']}" for h in history]
-    )
-    update.message.reply_text(f"<b>History</b>\n\n{escape(formatted)}", parse_mode="HTML")
 
 def eval_code(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -211,20 +159,19 @@ def handle_message(update: Update, context: CallbackContext):
     if not update.message:
         return
 
-    chat = update.message.chat
-    chat_id = chat.id
+    chat_id = update.message.chat.id
     user = update.message.from_user
+    chat_type = update.message.chat.type
+    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
     user_input = update.message.text if update.message.text else None
 
-    # If sticker, make Mitsuri reply
     if update.message.sticker:
         user_input = "Sticker sent 🩷"
+
     if not user_input:
         return
 
-    chat_type = chat.type
-    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
-
+    # Group mention handling
     if chat_type in ["group", "supergroup"]:
         now = time.time()
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:
@@ -243,11 +190,12 @@ def handle_message(update: Update, context: CallbackContext):
         user_input = re.sub(r'@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
         user_input = mitsuri_pattern.sub('', user_input).strip() or "Hi Mitsuri!"
 
-    save_chat_info(chat_id, user=user, chat=chat)
-    save_history(chat_id, "user", user_input)
-
-    history = load_history(chat_id, limit=6)
-    prompt = build_prompt([(h["role"], h["msg"]) for h in history], user_input, chosen_name)
+    # In-memory history
+    history = context.chat_data.setdefault("history", [])
+    history.append(("user", user_input))
+    if len(history) > 6:
+        history = history[-6:]
+    prompt = build_prompt(history, user_input, chosen_name)
 
     try:
         context.bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -255,8 +203,17 @@ def handle_message(update: Update, context: CallbackContext):
         pass
 
     reply = generate_with_retry(prompt)
-    save_history(chat_id, "bot", reply)
+    history.append(("bot", reply))
+    context.chat_data["history"] = history
     safe_reply_text(update, reply)
+
+def show(update: Update, context: CallbackContext):
+    history = context.chat_data.get("history", [])
+    if not history:
+        update.message.reply_text("No history yet 🌸")
+        return
+    formatted = "\n".join([f"{'👤' if r=='user' else '🌸'} {m}" for r, m in history])
+    update.message.reply_text(f"<b>History</b>\n\n{escape(formatted)}", parse_mode="HTML")
 
 def error_handler(update: object, context: CallbackContext):
     logging.error(f"Update: {update}")
@@ -275,15 +232,4 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("show", show))
-    dp.add_handler(CommandHandler("eval", eval_code, pass_args=True))
-
-    # Conversation handler (text + stickers)
-    dp.add_handler(MessageHandler(
-        (Filters.text | Filters.sticker) & ~Filters.command,
-        handle_message
-    ))
-
-    dp.add_error_handler(error_handler)
-
-    updater.start_polling()
-    updater.idle()
+    dp.add_handler(CommandHandler("eval", eval_code, pass_args=True
