@@ -5,15 +5,13 @@ import logging
 import re
 from dotenv import load_dotenv
 from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Updater,
     CommandHandler,
     MessageHandler,
     Filters,
     CallbackContext,
-    ChatMemberHandler,
-    CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
 from pymongo import MongoClient
@@ -31,12 +29,20 @@ SPECIAL_GROUP_ID = -1002759296936
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-1.5-flash-latest")
+model = genai.GenerativeModel(
+    "models/gemini-2.5-flash-lite",
+    generation_config={
+        "max_output_tokens": 512,
+        "temperature": 0.9,
+        "top_p": 0.95,
+    }
+)
 
 # === MongoDB setup ===
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
+history_collection = db["chat_history"]
 chat_info_collection.create_index("chat_id", unique=True)
 
 # === Logging setup ===
@@ -51,12 +57,6 @@ BOT_START_TIME = time.time()
 GROUP_COOLDOWN = {}
 
 # === Utility Functions ===
-def get_main_menu_buttons():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
-        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
-    ])
-
 def save_chat_info(chat_id, user=None, chat=None):
     data = {"chat_id": chat_id}
     if user:
@@ -68,6 +68,21 @@ def save_chat_info(chat_id, user=None, chat=None):
         if chat.username:
             data["chat_username"] = chat.username
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
+
+def save_history(chat_id, role, msg, limit=20):
+    """Store only last `limit` messages per chat in Mongo"""
+    history_collection.update_one(
+        {"chat_id": chat_id},
+        {"$push": {"messages": {"role": role, "msg": msg}, "$slice": -limit}},
+        upsert=True,
+    )
+
+def load_history(chat_id, limit=6):
+    """Get last `limit` messages for context"""
+    doc = history_collection.find_one({"chat_id": chat_id})
+    if not doc or "messages" not in doc:
+        return []
+    return doc["messages"][-limit:]
 
 def build_prompt(last_two_messages, user_input, chosen_name):
     system_instructions = """
@@ -88,7 +103,7 @@ def build_prompt(last_two_messages, user_input, chosen_name):
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
-    """Robust wrapper for Gemini API."""
+    """Robust wrapper for Gemini 2.5 Flash-Lite API."""
     for attempt in range(retries):
         try:
             start = time.time()
@@ -96,17 +111,21 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             duration = time.time() - start
             logging.info(f"Gemini response time: {round(duration, 2)}s")
 
-            if response is None:
-                return "Mujhe samajh nahi aaya... 🥺"
+            response_text = None
 
-            response_text = getattr(response, "text", None)
-            if not response_text and hasattr(response, "candidates"):
+            if hasattr(response, "text") and response.text:
+                response_text = response.text
+            elif hasattr(response, "candidates") and response.candidates:
                 try:
-                    response_text = response.candidates[0].text
+                    response_text = response.candidates[0].content.parts[0].text.strip()
                 except Exception:
-                    response_text = None
+                    pass
 
-            return response_text.strip() if response_text else "Kuch gadbad ho gayi... 😞"
+            if not response_text:
+                response_text = "Kuch gadbad ho gayi... 😞"
+
+            return response_text.strip()
+
         except Exception as e:
             logging.error(f"Gemini error on attempt {attempt + 1}: {e}")
             if attempt < retries - 1:
@@ -163,81 +182,85 @@ def ping(update: Update, context: CallbackContext):
         logging.error(f"/ping error: {e}")
         msg.edit_text("Something went wrong while checking ping.")
 
-def mitsuri_hi(update: Update, context: CallbackContext):
-    if not update.message or not update.message.text:
+def show(update: Update, context: CallbackContext):
+    chat_id = update.effective_chat.id
+    history = load_history(chat_id, limit=20)
+    if not history:
+        update.message.reply_text("No history yet 🌸")
         return
-    if update.message.chat.type in ["group", "supergroup"] and not update.message.text.startswith('/'):
-        if update.message.text.strip().lower() == "mitsuri":
-            update.message.reply_text("Hii!")
 
+    formatted = "\n".join(
+        [f"{'👤' if h['role']=='user' else '🌸'} {h['msg']}" for h in history]
+    )
+    update.message.reply_text(f"<b>History</b>\n\n{escape(formatted)}", parse_mode="HTML")
+
+def eval_code(update: Update, context: CallbackContext):
+    if update.message.from_user.id != OWNER_ID:
+        update.message.reply_text("❌ Not allowed.")
+        return
+
+    code = " ".join(context.args)
+    try:
+        result = eval(code)
+        update.message.reply_text(f"✅ Result:\n<pre>{escape(str(result))}</pre>", parse_mode="HTML")
+    except Exception as e:
+        update.message.reply_text(f"❌ Error:\n<pre>{escape(str(e))}</pre>", parse_mode="HTML")
+
+# === Conversation Handling ===
 def handle_message(update: Update, context: CallbackContext):
-    if not update.message or not update.message.text:
+    if not update.message:
         return
 
-    user_input = update.message.text.strip()
-    user = update.message.from_user
     chat = update.message.chat
     chat_id = chat.id
+    user = update.message.from_user
+    user_input = update.message.text if update.message.text else None
+
+    # If sticker, make Mitsuri reply
+    if update.message.sticker:
+        user_input = "Sticker sent 🩷"
+    if not user_input:
+        return
+
     chat_type = chat.type
     chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
 
-    user_info = chat_info_collection.find_one({"user_id": user.id})
-    if user_info and user_info.get("is_blocked"):
-        logging.info(f"Ignoring message from blocked user {user.id}")
-        return
-
     if chat_type in ["group", "supergroup"]:
-        if user_input.lower() == "mitsuri":
-            return
         now = time.time()
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:
             return
         GROUP_COOLDOWN[chat_id] = now
 
         is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
-        is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        mitsuri_pattern = re.compile(r'\b[Mm]itsuri\b')
+        mitsuri_pattern = re.compile(r'\b[Mm]itsuri\b|\@mitsuri_1bot', re.IGNORECASE)
         is_name_mentioned = mitsuri_pattern.search(user_input)
+        is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
-        if not (is_mention or is_reply or is_name_mentioned):
+        if not (is_mention or is_name_mentioned or is_reply):
             return
 
-        if is_mention:
-            user_input = re.sub(r'@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
-        if is_name_mentioned:
-            user_input = mitsuri_pattern.sub('', user_input).strip()
-        if not user_input:
-            return
+        # Clean input
+        user_input = re.sub(r'@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
+        user_input = mitsuri_pattern.sub('', user_input).strip() or "Hi Mitsuri!"
 
     save_chat_info(chat_id, user=user, chat=chat)
+    save_history(chat_id, "user", user_input)
 
-    history = context.chat_data.setdefault("history", [])
-    history.append(("user", user_input))
-    if len(history) > 6:
-        history = history[-6:]
-    prompt = build_prompt(history, user_input, chosen_name)
+    history = load_history(chat_id, limit=6)
+    prompt = build_prompt([(h["role"], h["msg"]) for h in history], user_input, chosen_name)
 
     try:
-        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception as e:
-        logging.warning(f"Typing animation failed: {e}")
+        context.bot.send_chat_action(chat_id=chat_id, action="typing")
+    except Exception:
+        pass
 
     reply = generate_with_retry(prompt)
-    history.append(("bot", reply))
-    context.chat_data["history"] = history
+    save_history(chat_id, "bot", reply)
     safe_reply_text(update, reply)
 
 def error_handler(update: object, context: CallbackContext):
     logging.error(f"Update: {update}")
     logging.error(f"Context error: {context.error}")
-    try:
-        raise context.error
-    except Unauthorized:
-        logging.warning("Unauthorized")
-    except BadRequest as e:
-        logging.warning(f"BadRequest: {e}")
-    except Exception as e:
-        logging.error(f"Unhandled error: {e}")
 
 # === Main ===
 if __name__ == "__main__":
@@ -251,14 +274,12 @@ if __name__ == "__main__":
     # Commands
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
+    dp.add_handler(CommandHandler("show", show))
+    dp.add_handler(CommandHandler("eval", eval_code, pass_args=True))
 
-    # Group single "mitsuri"
-    dp.add_handler(MessageHandler(Filters.regex(r"^[Mm]itsuri$") & Filters.group, mitsuri_hi))
-
-    # Main conversation handler
+    # Conversation handler (text + stickers)
     dp.add_handler(MessageHandler(
-        (Filters.text & ~Filters.command & Filters.group & (Filters.reply | Filters.entity("mention") | Filters.regex(r"\b[Mm]itsuri\b")))
-        | (Filters.text & ~Filters.command & Filters.private),
+        (Filters.text | Filters.sticker) & ~Filters.command,
         handle_message
     ))
 
