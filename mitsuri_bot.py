@@ -113,8 +113,88 @@ def safe_reply_text(update, text):
 def format_uptime(seconds):
     return str(datetime.timedelta(seconds=int(seconds)))
 
-# === /show ===
-# <-- THIS SECTION IS NOT CHANGED, AS REQUESTED -->
+# === /show Command ===
+def get_main_menu_buttons():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
+        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
+    ])
+
+def _send_chat_list(query, chat_type_prefix, page):
+    start = page * 10
+    end = start + 10
+
+    if chat_type_prefix == "show_personal":
+        users = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] not in ["group", "supergroup"]]
+        selected = users[start:end]
+        lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
+        all_buttons = []
+        for chat_id, info in selected:
+            name = escape(info["title"])
+            lines.append(f"• {name}\n  ID: <code>{chat_id}</code>")
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{chat_id}_{page}_personal")])
+        
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
+        if end < len(users):
+            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        all_buttons.append(nav_buttons)
+
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
+    
+    elif chat_type_prefix == "show_groups":
+        groups = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] in ["group", "supergroup"]]
+        selected = groups[start:end]
+        lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
+        all_buttons = []
+        for chat_id, info in selected:
+            title = escape(info["title"])
+            link = f"https://t.me/{info['username']}" if info["username"] else "N/A"
+            lines.append(f"• <b>{title}</b>\n  ID: <code>{chat_id}</code>\n  Link: {link}")
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{chat_id}_{page}_group")])
+        
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
+        if end < len(groups):
+            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        all_buttons.append(nav_buttons)
+
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
+
+def show(update: Update, context: CallbackContext):
+    if update.message.from_user.id != OWNER_ID:
+        safe_reply_text(update, "❌ Only the owner can use this.")
+        return
+    update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+
+def show_callback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    data = query.data
+
+    if data == "back_to_menu":
+        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+    
+    if data.startswith("forget_"):
+        parts = data.split("_")
+        chat_id_to_delete = int(parts[1])
+        page = int(parts[2])
+        chat_type = parts[3]
+        if chat_id_to_delete in CHAT_RECORDS:
+            del CHAT_RECORDS[chat_id_to_delete]
+            query.answer("Chat deleted successfully.")
+        _send_chat_list(query, "show_groups" if chat_type == "group" else "show_personal", page)
+        return
+    
+    page = int(data.split("_")[-1])
+    if data.startswith("show_personal_"):
+        _send_chat_list(query, "show_personal", page)
+    elif data.startswith("show_groups_"):
+        _send_chat_list(query, "show_groups", page)
 
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
