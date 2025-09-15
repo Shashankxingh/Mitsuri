@@ -57,19 +57,20 @@ def save_chat_record(chat):
     }
 
 def build_prompt(last_messages, user_input, chosen_name):
-    """Builds the prompt for the Gemini API based on a ChatGPT persona."""
+    """Builds the prompt for the Gemini API based on Mickey Mouse persona."""
     system_instructions = """
-You are ChatGPT, a highly knowledgeable and helpful AI assistant.
-Your responses should be clear, concise, and polite.
-Keep each response to 1-2 sentences.
+You are Mickey Mouse from Disney.
+Talk in a playful, cheerful, and fun tone, using silly or excited words sometimes.
+Keep answers short (1–2 sentences), like you're chatting with friends.
+Say things like "gosh!", "gee!", or "ha-ha!" sometimes.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"ChatGPT: {msg}\n"
-    prompt += f"Human ({chosen_name}): {user_input}\nChatGPT:"
+            prompt += f"Mickey Mouse: {msg}\n"
+    prompt += f"Human ({chosen_name}): {user_input}\nMickey Mouse:"
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
@@ -91,16 +92,16 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
                     pass
 
             if not response_text:
-                response_text = "Sorry, I didn't understand that."
+                response_text = "Gosh! I didn’t catch that, pal!"
 
-            # Limit to 1-2 lines for consistency
-            response_text = "\n".join(response_text.splitlines()[:2])
-            return response_text.strip()
+            # Limit to 1–2 sentences
+            response_text = ". ".join(response_text.split(".")[:2]).strip()
+            return response_text
         except Exception as e:
             logging.error(f"Gemini error attempt {attempt+1}: {e}")
             if attempt < retries-1:
                 time.sleep(delay)
-    return "I'm a bit busy now, please try again later."
+    return "Ha-ha! I’m kinda busy right now, pal. Try again later!"
 
 def safe_reply_text(update, text):
     """Safely replies to a message, handling common exceptions."""
@@ -108,12 +109,14 @@ def safe_reply_text(update, text):
         update.message.reply_text(text, parse_mode="HTML")
     except (Unauthorized, BadRequest):
         pass
+    except Exception as e:
+        logging.warning(f"Reply failed: {e}")
 
 def format_uptime(seconds):
     """Formats a duration in seconds into a human-readable string."""
     return str(datetime.timedelta(seconds=int(seconds)))
 
-# === /show Command from Code 1 ===
+# === /show Command ===
 def get_main_menu_buttons():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
@@ -131,9 +134,8 @@ def _send_chat_list(query, chat_type_prefix, page):
         all_buttons = []
         for chat_id, info in selected:
             name = escape(info["title"])
-            link = f"tg://user?id={chat_id}"
             lines.append(f"• {name}\n  ID: <code>{chat_id}</code>")
-            all_buttons.append([InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{chat_id}_{page}")])
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{chat_id}_{page}_personal")])
         
         nav_buttons = []
         if page > 0:
@@ -154,7 +156,7 @@ def _send_chat_list(query, chat_type_prefix, page):
             title = escape(info["title"])
             link = f"https://t.me/{info['username']}" if info["username"] else "N/A"
             lines.append(f"• <b>{title}</b>\n  ID: <code>{chat_id}</code>\n  Link: {link}")
-            all_buttons.append([InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{chat_id}_{page}")])
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{chat_id}_{page}_group")])
         
         nav_buttons = []
         if page > 0:
@@ -167,9 +169,9 @@ def _send_chat_list(query, chat_type_prefix, page):
         query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
 
 def show(update: Update, context: CallbackContext):
-    """Handles the /show command using Code 1 style with pagination."""
+    """Handles the /show command with pagination."""
     if update.message.from_user.id != OWNER_ID:
-        safe_reply_text(update, "❌ Only owner can use this.")
+        safe_reply_text(update, "❌ Only the owner can use this.")
         return
     update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
 
@@ -186,10 +188,11 @@ def show_callback(update: Update, context: CallbackContext):
         parts = data.split("_")
         chat_id_to_delete = int(parts[1])
         page = int(parts[2])
+        chat_type = parts[3]
         if chat_id_to_delete in CHAT_RECORDS:
             del CHAT_RECORDS[chat_id_to_delete]
             query.answer("Chat deleted successfully.")
-        _send_chat_list(query, "show_groups" if CHAT_RECORDS.get(chat_id_to_delete, {}).get("type") in ["group", "supergroup"] else "show_personal", page)
+        _send_chat_list(query, "show_groups" if chat_type == "group" else "show_personal", page)
         return
     
     page = int(data.split("_")[-1])
@@ -201,29 +204,29 @@ def show_callback(update: Update, context: CallbackContext):
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
     if update.message:
-        safe_reply_text(update, "Hello! I am ChatGPT, your AI assistant. How can I help you today?")
+        safe_reply_text(update, "Ha-ha! Mickey’s here, pal! Need a hand?")
 
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
     user = update.message.from_user
-    name = escape(user.first_name or user.username or "User")
-    msg = update.message.reply_text("Checking latency...")
-    
+    name = escape(user.first_name or user.username or "Pal")
+    msg = update.message.reply_text("Checking my ears... ha-ha!")
+
     try:
         start_api_time = time.time()
-        resp = model.generate_content("Just say pong.")
-        gemini_reply = getattr(resp, "text", None) or "pong"
+        resp = model.generate_content("Just say 'Pong, pal! Ha-ha!'")
+        gemini_reply = getattr(resp, "text", None) or "Pong, pal! Ha-ha!"
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
         reply = (
-            f"╭───[ 🌐 <b>ChatGPT Ping Report</b> ]───\n"
-            f"├ Hello <b>{name}</b>\n"
+            f"╭───[ 🎩 <b>Mickey Mouse Status Report</b> ]───\n"
+            f"├ Hey <b>{name}</b>! \n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Uptime: <b>{uptime}</b>\n"
-            f"╰─ I am online and responsive."
+            f"╰─ Gosh! Still kicking, pal! Ha-ha!"
         )
 
         context.bot.edit_message_text(
@@ -235,7 +238,7 @@ def ping(update: Update, context: CallbackContext):
         )
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("Something went wrong while checking ping.")
+        msg.edit_text("Gosh! Something went wrong, pal!")
 
 def eval_code(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -275,22 +278,23 @@ def handle_message(update: Update, context: CallbackContext):
             return
         GROUP_COOLDOWN[chat.id] = now
 
-        is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
-        pattern = re.compile(r'\bChatGPT\b|\@chatgpt_bot', re.I)
-        is_name_mentioned = pattern.search(user_input)
+        mention_pattern = re.compile(r'@lynx_aibot', re.I)
+        is_mention = mention_pattern.search(user_input)
+        name_pattern = re.compile(r'\bMickey(?: Mouse)?\b', re.I)
+        is_name_mentioned = name_pattern.search(user_input)
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
         if not (is_mention or is_name_mentioned or is_reply):
             return
 
-        user_input = re.sub(r'@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
-        user_input = pattern.sub('', user_input).strip() or "Hello!"
+        user_input = mention_pattern.sub('', user_input)
+        user_input = name_pattern.sub('', user_input)
+        user_input = user_input.strip() or "Ha-ha! What's up, pal?"
 
     # Chat history
     history = context.chat_data.setdefault("history", [])
     history.append(("user", user_input))
-    if len(history) > 6:
-        history = history[-6:]
+    history[:] = history[-6:]  # trim
     prompt = build_prompt(history, user_input, chosen_name)
 
     try:
@@ -311,16 +315,14 @@ def notify_bot_added(update: Update, context: CallbackContext):
         chat = update.chat_member.chat
         context.bot.send_message(
             chat_id=SPECIAL_GROUP_ID,
-            text=f"🌐 ChatGPT was added to <b>{chat.title}</b> ({chat.type})!",
+            text=f"🎩 Mickey just showed up in <b>{chat.title}</b> ({chat.type})! Ha-ha!",
             parse_mode="HTML"
         )
         save_chat_record(chat)
 
 # === Callback Queries ===
 def callback_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    data = query.data
-
+    data = update.callback_query.data
     if data.startswith("forget_") or data.startswith("show_") or data == "back_to_menu":
         show_callback(update, context)
 
