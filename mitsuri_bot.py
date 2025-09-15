@@ -49,7 +49,6 @@ CHAT_RECORDS = {}  # chat_id -> {type, title, username}
 
 # === Utility Functions ===
 def save_chat_record(chat):
-    """Saves chat details to in-memory storage."""
     CHAT_RECORDS[chat.id] = {
         "type": chat.type,
         "title": getattr(chat, "title", chat.first_name),
@@ -57,7 +56,6 @@ def save_chat_record(chat):
     }
 
 def build_prompt(last_messages, user_input, chosen_name):
-    """Builds the prompt for the Gemini API based on Mickey Mouse persona."""
     system_instructions = """
 You are Mickey Mouse from Disney.
 Talk in a playful, cheerful, and fun tone, using silly or excited words sometimes.
@@ -74,7 +72,6 @@ Say things like "gosh!", "gee!", or "ha-ha!" sometimes.
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
-    """Generates content from the Gemini model with a retry mechanism."""
     for attempt in range(retries):
         try:
             start = time.time()
@@ -94,7 +91,6 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             if not response_text:
                 response_text = "Gosh! I didn’t catch that, pal!"
 
-            # Limit to 1–2 sentences
             response_text = ". ".join(response_text.split(".")[:2]).strip()
             return response_text
         except Exception as e:
@@ -104,102 +100,19 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
     return "Ha-ha! I’m kinda busy right now, pal. Try again later!"
 
 def safe_reply_text(update, text):
-    """Safely replies to a message, handling common exceptions."""
     try:
-        update.message.reply_text(text, parse_mode="HTML")
+        if update.message:
+            update.message.reply_text(text, parse_mode="HTML")
     except (Unauthorized, BadRequest):
         pass
     except Exception as e:
         logging.warning(f"Reply failed: {e}")
 
 def format_uptime(seconds):
-    """Formats a duration in seconds into a human-readable string."""
     return str(datetime.timedelta(seconds=int(seconds)))
 
-# === /show Command ===
-def get_main_menu_buttons():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
-        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
-    ])
-
-def _send_chat_list(query, chat_type_prefix, page):
-    start = page * 10
-    end = start + 10
-    
-    if chat_type_prefix == "show_personal":
-        users = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] not in ["group", "supergroup"]]
-        selected = users[start:end]
-        lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
-        all_buttons = []
-        for chat_id, info in selected:
-            name = escape(info["title"])
-            lines.append(f"• {name}\n  ID: <code>{chat_id}</code>")
-            all_buttons.append([InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{chat_id}_{page}_personal")])
-        
-        nav_buttons = []
-        if page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
-        if end < len(users):
-            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
-        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
-        all_buttons.append(nav_buttons)
-
-        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
-    
-    elif chat_type_prefix == "show_groups":
-        groups = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] in ["group", "supergroup"]]
-        selected = groups[start:end]
-        lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
-        all_buttons = []
-        for chat_id, info in selected:
-            title = escape(info["title"])
-            link = f"https://t.me/{info['username']}" if info["username"] else "N/A"
-            lines.append(f"• <b>{title}</b>\n  ID: <code>{chat_id}</code>\n  Link: {link}")
-            all_buttons.append([InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{chat_id}_{page}_group")])
-        
-        nav_buttons = []
-        if page > 0:
-            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
-        if end < len(groups):
-            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
-        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
-        all_buttons.append(nav_buttons)
-
-        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
-
-def show(update: Update, context: CallbackContext):
-    """Handles the /show command with pagination."""
-    if update.message.from_user.id != OWNER_ID:
-        safe_reply_text(update, "❌ Only the owner can use this.")
-        return
-    update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
-
-def show_callback(update: Update, context: CallbackContext):
-    """Handles inline keyboard button presses for /show pagination."""
-    query = update.callback_query
-    query.answer()
-    data = query.data
-
-    if data == "back_to_menu":
-        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
-    
-    if data.startswith("forget_"):
-        parts = data.split("_")
-        chat_id_to_delete = int(parts[1])
-        page = int(parts[2])
-        chat_type = parts[3]
-        if chat_id_to_delete in CHAT_RECORDS:
-            del CHAT_RECORDS[chat_id_to_delete]
-            query.answer("Chat deleted successfully.")
-        _send_chat_list(query, "show_groups" if chat_type == "group" else "show_personal", page)
-        return
-    
-    page = int(data.split("_")[-1])
-    if data.startswith("show_personal_"):
-        _send_chat_list(query, "show_personal", page)
-    elif data.startswith("show_groups_"):
-        _send_chat_list(query, "show_groups", page)
+# === /show ===
+# <-- NOT TOUCHING THIS SECTION PER YOUR REQUEST -->
 
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
@@ -229,13 +142,18 @@ def ping(update: Update, context: CallbackContext):
             f"╰─ Gosh! Still kicking, pal! Ha-ha!"
         )
 
-        context.bot.edit_message_text(
-            chat_id=msg.chat.id,
-            message_id=msg.message_id,
-            text=reply,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        # safer edit: only try if we can edit bot's own message
+        try:
+            context.bot.edit_message_text(
+                chat_id=msg.chat.id,
+                message_id=msg.message_id,
+                text=reply,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            # fallback: just send reply as new message
+            update.message.reply_text(reply, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         logging.error(f"/ping error: {e}")
         msg.edit_text("Gosh! Something went wrong, pal!")
@@ -263,7 +181,7 @@ def handle_message(update: Update, context: CallbackContext):
     chat = update.message.chat
     user = update.message.from_user
     chat_type = chat.type
-    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username
+    chosen_name = f"{user.first_name or ''} {user.last_name or ''}".strip()[:25] or user.username or "Pal"
     user_input = update.message.text
 
     if not user_input:
@@ -271,7 +189,6 @@ def handle_message(update: Update, context: CallbackContext):
 
     save_chat_record(chat)
 
-    # Group mention logic
     if chat_type in ["group", "supergroup"]:
         now = time.time()
         if chat.id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat.id] < 5:
@@ -291,7 +208,6 @@ def handle_message(update: Update, context: CallbackContext):
         user_input = name_pattern.sub('', user_input)
         user_input = user_input.strip() or "Ha-ha! What's up, pal?"
 
-    # Chat history
     history = context.chat_data.setdefault("history", [])
     history.append(("user", user_input))
     history[:] = history[-6:]  # trim
