@@ -27,7 +27,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 # === Owner and special group IDs ===
 OWNER_ID = 8162412883
-SPECIAL_GROUP_ID = -1002759296936 # Replace with your special group ID
+SPECIAL_GROUP_ID = -1002759296936  # Replace with your special group ID
 
 # === Gemini AI config ===
 genai.configure(api_key=GEMINI_API_KEY)
@@ -57,20 +57,19 @@ def save_chat_record(chat):
     }
 
 def build_prompt(last_messages, user_input, chosen_name):
-    """Builds the prompt for the Gemini API based on a character personality."""
+    """Builds the prompt for the Gemini API based on a ChatGPT persona."""
     system_instructions = """
-- Tum Mitsuri Kanroji ho, Demon Slayer anime se.
-- Tumhe bahut knowledgeable bhi ho par in a cute way.
-- Actions jaise *giggles* ya *blush* nahi.
-- baaton ko 1 se 2 line me hi bolti ho.
+You are ChatGPT, a highly knowledgeable and helpful AI assistant.
+Your responses should be clear, concise, and polite.
+Keep each response to 1-2 sentences.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"Mitsuri: {msg}\n"
-    prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
+            prompt += f"ChatGPT: {msg}\n"
+    prompt += f"Human ({chosen_name}): {user_input}\nChatGPT:"
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
@@ -92,16 +91,16 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
                     pass
 
             if not response_text:
-                response_text = "Kuch gadbad ho gayi... 😞"
+                response_text = "Sorry, I didn't understand that."
 
-            # Limit to 1-2 lines for character consistency
+            # Limit to 1-2 lines for consistency
             response_text = "\n".join(response_text.splitlines()[:2])
             return response_text.strip()
         except Exception as e:
             logging.error(f"Gemini error attempt {attempt+1}: {e}")
             if attempt < retries-1:
                 time.sleep(delay)
-    return "Abhi main thoda busy hu... baad mein baat karte hain! 😊"
+    return "I'm a bit busy now, please try again later."
 
 def safe_reply_text(update, text):
     """Safely replies to a message, handling common exceptions."""
@@ -114,14 +113,97 @@ def format_uptime(seconds):
     """Formats a duration in seconds into a human-readable string."""
     return str(datetime.timedelta(seconds=int(seconds)))
 
+# === /show Command from Code 1 ===
+def get_main_menu_buttons():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
+        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
+    ])
+
+def _send_chat_list(query, chat_type_prefix, page):
+    start = page * 10
+    end = start + 10
+    
+    if chat_type_prefix == "show_personal":
+        users = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] not in ["group", "supergroup"]]
+        selected = users[start:end]
+        lines = [f"<b>👤 Personal Chats (Page {page + 1})</b>"]
+        all_buttons = []
+        for chat_id, info in selected:
+            name = escape(info["title"])
+            link = f"tg://user?id={chat_id}"
+            lines.append(f"• {name}\n  ID: <code>{chat_id}</code>")
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {name}", callback_data=f"forget_{chat_id}_{page}")])
+        
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
+        if end < len(users):
+            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        all_buttons.append(nav_buttons)
+
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
+    
+    elif chat_type_prefix == "show_groups":
+        groups = [(cid, info) for cid, info in CHAT_RECORDS.items() if info["type"] in ["group", "supergroup"]]
+        selected = groups[start:end]
+        lines = [f"<b>👥 Group Chats (Page {page + 1})</b>"]
+        all_buttons = []
+        for chat_id, info in selected:
+            title = escape(info["title"])
+            link = f"https://t.me/{info['username']}" if info["username"] else "N/A"
+            lines.append(f"• <b>{title}</b>\n  ID: <code>{chat_id}</code>\n  Link: {link}")
+            all_buttons.append([InlineKeyboardButton(f"❌ Forget {title}", callback_data=f"forget_{chat_id}_{page}")])
+        
+        nav_buttons = []
+        if page > 0:
+            nav_buttons.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{chat_type_prefix}_{page - 1}"))
+        if end < len(groups):
+            nav_buttons.append(InlineKeyboardButton("Next ▶️", callback_data=f"{chat_type_prefix}_{page + 1}"))
+        nav_buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="back_to_menu"))
+        all_buttons.append(nav_buttons)
+
+        query.edit_message_text("\n\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup(all_buttons))
+
+def show(update: Update, context: CallbackContext):
+    """Handles the /show command using Code 1 style with pagination."""
+    if update.message.from_user.id != OWNER_ID:
+        safe_reply_text(update, "❌ Only owner can use this.")
+        return
+    update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+
+def show_callback(update: Update, context: CallbackContext):
+    """Handles inline keyboard button presses for /show pagination."""
+    query = update.callback_query
+    query.answer()
+    data = query.data
+
+    if data == "back_to_menu":
+        return query.edit_message_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+    
+    if data.startswith("forget_"):
+        parts = data.split("_")
+        chat_id_to_delete = int(parts[1])
+        page = int(parts[2])
+        if chat_id_to_delete in CHAT_RECORDS:
+            del CHAT_RECORDS[chat_id_to_delete]
+            query.answer("Chat deleted successfully.")
+        _send_chat_list(query, "show_groups" if CHAT_RECORDS.get(chat_id_to_delete, {}).get("type") in ["group", "supergroup"] else "show_personal", page)
+        return
+    
+    page = int(data.split("_")[-1])
+    if data.startswith("show_personal_"):
+        _send_chat_list(query, "show_personal", page)
+    elif data.startswith("show_groups_"):
+        _send_chat_list(query, "show_groups", page)
+
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
-    """Handles the /start command."""
     if update.message:
-        safe_reply_text(update, "Hello. Mitsuri is here. How can I help you today?")
+        safe_reply_text(update, "Hello! I am ChatGPT, your AI assistant. How can I help you today?")
 
 def ping(update: Update, context: CallbackContext):
-    """Handles the /ping command, showing bot and API latency."""
     if not update.message:
         return
     user = update.message.from_user
@@ -136,12 +218,12 @@ def ping(update: Update, context: CallbackContext):
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
         reply = (
-            f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
+            f"╭───[ 🌐 <b>ChatGPT Ping Report</b> ]───\n"
             f"├ Hello <b>{name}</b>\n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Uptime: <b>{uptime}</b>\n"
-            f"╰─ I'm here and responsive."
+            f"╰─ I am online and responsive."
         )
 
         context.bot.edit_message_text(
@@ -156,7 +238,6 @@ def ping(update: Update, context: CallbackContext):
         msg.edit_text("Something went wrong while checking ping.")
 
 def eval_code(update: Update, context: CallbackContext):
-    """Handles the /eval command for the owner, executing Python code safely."""
     if update.message.from_user.id != OWNER_ID:
         update.message.reply_text("❌ Not allowed.")
         return
@@ -174,52 +255,8 @@ def eval_code(update: Update, context: CallbackContext):
         sys.stdout = sys.__stdout__
         update.message.reply_text(f"❌ Error:\n<pre>{escape(str(e))}</pre>", parse_mode="HTML")
 
-def show(update: Update, context: CallbackContext):
-    """Handles the /show command, displaying a list of tracked chats with pagination."""
-    if update.message.from_user.id != OWNER_ID:
-        safe_reply_text(update, "❌ Only owner can use this.")
-        return
-    show_page(update, context, 0)
-
-def show_page(update: Update, context: CallbackContext, page: int):
-    """Renders a paginated view of chat records."""
-    items_per_page = 10
-    chats = list(CHAT_RECORDS.items())
-    total_pages = (len(chats) - 1) // items_per_page + 1 if chats else 1
-    page = max(0, min(page, total_pages - 1))
-
-    start_index = page * items_per_page
-    end_index = start_index + items_per_page
-    keyboard = []
-
-    for chat_id, info in chats[start_index:end_index]:
-        title = escape(info["title"])
-        link = f"https://t.me/{info['username']}" if info["username"] else f"tg://user?id={chat_id}"
-        button_row = [
-            InlineKeyboardButton(title, url=link),
-            InlineKeyboardButton("Forget", callback_data=f"forget:{chat_id}")
-        ]
-        keyboard.append(button_row)
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅ Prev", callback_data=f"page:{page-1}"))
-    if page < total_pages - 1:
-        nav_buttons.append(InlineKeyboardButton("Next ➡", callback_data=f"page:{page+1}"))
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-
-    markup = InlineKeyboardMarkup(keyboard)
-
-    text = f"📄 Chats & Groups (Page {page+1}/{total_pages}):"
-    if update.callback_query:
-        update.callback_query.edit_message_text(text, reply_markup=markup)
-    else:
-        update.message.reply_text(text, reply_markup=markup)
-
 # === AI Chat Handler ===
 def handle_message(update: Update, context: CallbackContext):
-    """Handles all incoming messages and delegates them to the AI."""
     chat = update.message.chat
     user = update.message.from_user
     chat_type = chat.type
@@ -231,14 +268,6 @@ def handle_message(update: Update, context: CallbackContext):
 
     save_chat_record(chat)
 
-    # DM notification for owner
-    if chat_type == "private":
-        context.bot.send_message(
-            chat_id=SPECIAL_GROUP_ID,
-            text=f"🌸 <b>{user.first_name}</b> (@{user.username}) started a DM with Mitsuri!",
-            parse_mode="HTML"
-        )
-
     # Group mention logic
     if chat_type in ["group", "supergroup"]:
         now = time.time()
@@ -247,17 +276,17 @@ def handle_message(update: Update, context: CallbackContext):
         GROUP_COOLDOWN[chat.id] = now
 
         is_mention = context.bot.username and context.bot.username.lower() in user_input.lower()
-        mitsuri_pattern = re.compile(r'\b[Mm]itsuri\b|\@mitsuri_1bot', re.I)
-        is_name_mentioned = mitsuri_pattern.search(user_input)
+        pattern = re.compile(r'\bChatGPT\b|\@chatgpt_bot', re.I)
+        is_name_mentioned = pattern.search(user_input)
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
         if not (is_mention or is_name_mentioned or is_reply):
             return
 
         user_input = re.sub(r'@' + re.escape(context.bot.username), '', user_input, flags=re.I).strip()
-        user_input = mitsuri_pattern.sub('', user_input).strip() or "Hi Mitsuri!"
+        user_input = pattern.sub('', user_input).strip() or "Hello!"
 
-    # In-memory chat history
+    # Chat history
     history = context.chat_data.setdefault("history", [])
     history.append(("user", user_input))
     if len(history) > 6:
@@ -276,50 +305,27 @@ def handle_message(update: Update, context: CallbackContext):
 
 # === Bot-added notifications ===
 def notify_bot_added(update: Update, context: CallbackContext):
-    """Notifies the owner when the bot is added to a new chat."""
     member_status = update.chat_member.new_chat_member.status
     user = update.chat_member.new_chat_member.user
     if user.id == context.bot.id and member_status == "member":
         chat = update.chat_member.chat
         context.bot.send_message(
             chat_id=SPECIAL_GROUP_ID,
-            text=f"🌸 Mitsuri was added to <b>{chat.title}</b> ({chat.type})!",
+            text=f"🌐 ChatGPT was added to <b>{chat.title}</b> ({chat.type})!",
             parse_mode="HTML"
         )
         save_chat_record(chat)
 
 # === Callback Queries ===
 def callback_handler(update: Update, context: CallbackContext):
-    """Handles inline keyboard button presses."""
     query = update.callback_query
     data = query.data
 
-    if data.startswith("forget:"):
-        chat_id = int(data.split(":")[1])
-        info = CHAT_RECORDS.get(chat_id)
-        if not info:
-            query.answer("❌ Chat not found.")
-            return
+    if data.startswith("forget_") or data.startswith("show_") or data == "back_to_menu":
+        show_callback(update, context)
 
-        if info["type"] in ["group", "supergroup"]:
-            try:
-                context.bot.leave_chat(chat_id)
-                del CHAT_RECORDS[chat_id]
-                query.answer("Left the group successfully.")
-            except Exception as e:
-                query.answer(f"Error leaving group: {e}")
-        else:
-            del CHAT_RECORDS[chat_id]
-            query.answer("Deleted chat successfully.")
-        
-        show_page(update, context, 0)
-
-    elif data.startswith("page:"):
-        page = int(data.split(":")[1])
-        show_page(update, context, page)
-
+# === Error handler ===
 def error_handler(update: object, context: CallbackContext):
-    """Log all errors to the console."""
     logging.error(f"Update: {update}")
     logging.error(f"Context error: {context.error}")
 
@@ -331,24 +337,17 @@ if __name__ == "__main__":
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # Command Handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("eval", eval_code, pass_args=True))
     dp.add_handler(CommandHandler("show", show))
 
-    # Message Handler (only for text)
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    # Bot-added notifications
     dp.add_handler(ChatMemberHandler(notify_bot_added, ChatMemberHandler.CHAT_MEMBER))
-
-    # Callback queries
     dp.add_handler(CallbackQueryHandler(callback_handler))
 
-    # Error handler
     dp.add_error_handler(error_handler)
 
-    # Start the bot
     updater.start_polling()
     updater.idle()
