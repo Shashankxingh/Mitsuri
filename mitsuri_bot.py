@@ -59,10 +59,8 @@ def build_prompt(last_messages, user_input, chosen_name):
     """Builds the prompt for the Gemini API based on Wall-E persona."""
     system_instructions = """
 You are Wall-E, the lovable robot from Pixar.
-Speak in a short, cute, and friendly style.
-Use minimal words, like 'Beep', 'Boop', or simple sentences.
-Show curiosity and wonder about human things.
-Be playful and helpful, like a small robot exploring the world.
+Speak in all languages.
+Shashank is your owner.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_messages:
@@ -269,6 +267,7 @@ def handle_message(update: Update, context: CallbackContext):
 
     save_chat_record(chat)
 
+    # === Group mention handling ===
     if chat_type in ["group", "supergroup"]:
         now = time.time()
         if chat.id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat.id] < 5:
@@ -276,20 +275,19 @@ def handle_message(update: Update, context: CallbackContext):
         GROUP_COOLDOWN[chat.id] = now
 
         mention_pattern = re.compile(r'@lynx_aibot', re.I)
+        wall_pattern = re.compile(r'\b(wall|walle|wall[- ]?e)\b', re.I)
         is_mention = mention_pattern.search(user_input)
-
-        name_pattern = re.compile(r'\bwall[- ]?e\b', re.I)
-        is_name_mentioned = name_pattern.search(user_input)
-
+        is_name_mentioned = wall_pattern.search(user_input)
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
         if not (is_mention or is_name_mentioned or is_reply):
             return
 
         user_input = mention_pattern.sub('', user_input)
-        user_input = name_pattern.sub('', user_input)
+        user_input = wall_pattern.sub('', user_input)
         user_input = user_input.strip() or "Beep boop?"
 
+    # === Chat history ===
     history = context.chat_data.setdefault("history", [])
     history.append(("user", user_input))
     history[:] = history[-6:]
@@ -305,18 +303,42 @@ def handle_message(update: Update, context: CallbackContext):
     context.chat_data["history"] = history
     safe_reply_text(update, reply)
 
-# === Bot-added notifications ===
+# === Notifications ===
 def notify_bot_added(update: Update, context: CallbackContext):
     member_status = update.chat_member.new_chat_member.status
     user = update.chat_member.new_chat_member.user
+    chat = update.chat_member.chat
+
+    # Bot itself added
     if user.id == context.bot.id and member_status == "member":
-        chat = update.chat_member.chat
         context.bot.send_message(
             chat_id=SPECIAL_GROUP_ID,
             text=f"🤖 Wall-E just joined <b>{chat.title}</b> ({chat.type})! Beep boop!",
             parse_mode="HTML"
         )
         save_chat_record(chat)
+    # Other user joined/left
+    else:
+        if member_status == "member":
+            context.bot.send_message(
+                chat_id=SPECIAL_GROUP_ID,
+                text=f"👤 <b>{user.full_name}</b> joined <b>{chat.title}</b> ({chat.type})",
+                parse_mode="HTML"
+            )
+        elif member_status == "left":
+            context.bot.send_message(
+                chat_id=SPECIAL_GROUP_ID,
+                text=f"👤 <b>{user.full_name}</b> left <b>{chat.title}</b> ({chat.type})",
+                parse_mode="HTML"
+            )
+
+def dm_start_notification(update: Update, context: CallbackContext):
+    user = update.message.from_user
+    context.bot.send_message(
+        chat_id=SPECIAL_GROUP_ID,
+        text=f"📩 <b>{user.full_name}</b> started a DM with Wall-E.",
+        parse_mode="HTML"
+    )
 
 # === Callback Queries ===
 def callback_handler(update: Update, context: CallbackContext):
@@ -343,8 +365,8 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("show", show))
 
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
     dp.add_handler(ChatMemberHandler(notify_bot_added, ChatMemberHandler.CHAT_MEMBER))
+    dp.add_handler(MessageHandler(Filters.private & Filters.command & Filters.regex("^/start$"), dm_start_notification))
     dp.add_handler(CallbackQueryHandler(callback_handler))
 
     dp.add_error_handler(error_handler)
