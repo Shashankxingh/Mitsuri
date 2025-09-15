@@ -56,19 +56,21 @@ def save_chat_record(chat):
     }
 
 def build_prompt(last_messages, user_input, chosen_name):
+    """Builds the prompt for the Gemini API based on Wall-E persona."""
     system_instructions = """
-You are Mickey Mouse from Disney.
-Talk in a playful, cheerful, and fun tone, using silly or excited words sometimes.
-Keep answers short (1–2 sentences), like you're chatting with friends.
-Say things like "gosh!", "gee!", or "ha-ha!" sometimes.
+You are Wall-E, the lovable robot from Pixar.
+Speak in a short, cute, and friendly style.
+Use minimal words, like 'Beep', 'Boop', or simple sentences.
+Show curiosity and wonder about human things.
+Be playful and helpful, like a small robot exploring the world.
 """
     prompt = system_instructions.strip() + "\n\n"
     for role, msg in last_messages:
         if role == "user":
             prompt += f"Human ({chosen_name}): {msg}\n"
         elif role == "bot":
-            prompt += f"Mickey Mouse: {msg}\n"
-    prompt += f"Human ({chosen_name}): {user_input}\nMickey Mouse:"
+            prompt += f"Wall-E: {msg}\n"
+    prompt += f"Human ({chosen_name}): {user_input}\nWall-E:"
     return prompt
 
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
@@ -89,7 +91,7 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
                     pass
 
             if not response_text:
-                response_text = "Gosh! I didn’t catch that, pal!"
+                response_text = "Beep boop! Did not understand, pal!"
 
             response_text = ". ".join(response_text.split(".")[:2]).strip()
             return response_text
@@ -97,7 +99,7 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
             logging.error(f"Gemini error attempt {attempt+1}: {e}")
             if attempt < retries-1:
                 time.sleep(delay)
-    return "Ha-ha! I’m kinda busy right now, pal. Try again later!"
+    return "Beep boop! Busy right now, try later!"
 
 def safe_reply_text(update, text):
     try:
@@ -112,37 +114,36 @@ def format_uptime(seconds):
     return str(datetime.timedelta(seconds=int(seconds)))
 
 # === /show ===
-# <-- NOT TOUCHING THIS SECTION PER YOUR REQUEST -->
+# <-- THIS SECTION IS NOT CHANGED, AS REQUESTED -->
 
 # === Command Handlers ===
 def start(update: Update, context: CallbackContext):
     if update.message:
-        safe_reply_text(update, "Ha-ha! Mickey’s here, pal! Need a hand?")
+        safe_reply_text(update, "Beep boop! Wall-E here, pal!")
 
 def ping(update: Update, context: CallbackContext):
     if not update.message:
         return
     user = update.message.from_user
     name = escape(user.first_name or user.username or "Pal")
-    msg = update.message.reply_text("Checking my ears... ha-ha!")
+    msg = update.message.reply_text("Beep... checking...")
 
     try:
         start_api_time = time.time()
-        resp = model.generate_content("Just say 'Pong, pal! Ha-ha!'")
-        gemini_reply = getattr(resp, "text", None) or "Pong, pal! Ha-ha!"
+        resp = model.generate_content("Just say 'Beep! Pong!'")
+        gemini_reply = getattr(resp, "text", None) or "Beep! Pong!"
         api_latency = round((time.time() - start_api_time) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
 
         reply = (
-            f"╭───[ 🎩 <b>Mickey Mouse Status Report</b> ]───\n"
+            f"╭───[ 🤖 <b>Wall-E Status</b> ]───\n"
             f"├ Hey <b>{name}</b>! \n"
             f"├ Ping: <b>{gemini_reply}</b>\n"
             f"├ API Latency: <b>{api_latency} ms</b>\n"
             f"├ Uptime: <b>{uptime}</b>\n"
-            f"╰─ Gosh! Still kicking, pal! Ha-ha!"
+            f"╰─ Beep boop! Still exploring!"
         )
 
-        # safer edit: only try if we can edit bot's own message
         try:
             context.bot.edit_message_text(
                 chat_id=msg.chat.id,
@@ -152,11 +153,10 @@ def ping(update: Update, context: CallbackContext):
                 disable_web_page_preview=True,
             )
         except Exception:
-            # fallback: just send reply as new message
             update.message.reply_text(reply, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         logging.error(f"/ping error: {e}")
-        msg.edit_text("Gosh! Something went wrong, pal!")
+        msg.edit_text("Beep boop! Something went wrong!")
 
 def eval_code(update: Update, context: CallbackContext):
     if update.message.from_user.id != OWNER_ID:
@@ -197,8 +197,10 @@ def handle_message(update: Update, context: CallbackContext):
 
         mention_pattern = re.compile(r'@lynx_aibot', re.I)
         is_mention = mention_pattern.search(user_input)
-        name_pattern = re.compile(r'\bMickey(?: Mouse)?\b', re.I)
+
+        name_pattern = re.compile(r'\bwall[- ]?e\b', re.I)
         is_name_mentioned = name_pattern.search(user_input)
+
         is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
 
         if not (is_mention or is_name_mentioned or is_reply):
@@ -206,11 +208,11 @@ def handle_message(update: Update, context: CallbackContext):
 
         user_input = mention_pattern.sub('', user_input)
         user_input = name_pattern.sub('', user_input)
-        user_input = user_input.strip() or "Ha-ha! What's up, pal?"
+        user_input = user_input.strip() or "Beep boop?"
 
     history = context.chat_data.setdefault("history", [])
     history.append(("user", user_input))
-    history[:] = history[-6:]  # trim
+    history[:] = history[-6:]
     prompt = build_prompt(history, user_input, chosen_name)
 
     try:
@@ -231,7 +233,7 @@ def notify_bot_added(update: Update, context: CallbackContext):
         chat = update.chat_member.chat
         context.bot.send_message(
             chat_id=SPECIAL_GROUP_ID,
-            text=f"🎩 Mickey just showed up in <b>{chat.title}</b> ({chat.type})! Ha-ha!",
+            text=f"🤖 Wall-E just joined <b>{chat.title}</b> ({chat.type})! Beep boop!",
             parse_mode="HTML"
         )
         save_chat_record(chat)
