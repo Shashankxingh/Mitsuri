@@ -17,7 +17,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
-from telegram.helpers import escape_markdown
+from telegram.utils.helpers import escape_markdown
 from pymongo import MongoClient
 import google.generativeai as genai
 
