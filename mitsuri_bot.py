@@ -19,7 +19,7 @@ from telegram.ext import (
 from telegram.error import Unauthorized, BadRequest
 from telegram.utils.helpers import escape_markdown
 from pymongo import MongoClient
-import google.generativeai as genai
+import google-genai as genai
 # === NEW IMPORT FOR GEMINI CONFIGURATION ===
 from google.genai import types
 
