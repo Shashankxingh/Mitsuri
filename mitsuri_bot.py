@@ -31,7 +31,7 @@ SPECIAL_GROUP_ID = -1002759296936
 
 # === Gemini configuration ===
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-2.5-flash-lite-latest")
+model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
 
 # === MongoDB setup ===
 mongo_client = MongoClient(MONGO_URI)
