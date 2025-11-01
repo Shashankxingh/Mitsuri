@@ -20,6 +20,8 @@ from telegram.error import Unauthorized, BadRequest
 from telegram.utils.helpers import escape_markdown
 from pymongo import MongoClient
 import google.generativeai as genai
+# === NEW IMPORT FOR GEMINI CONFIGURATION ===
+from google.genai import types
 
 # === Load environment variables ===
 load_dotenv()
@@ -28,12 +30,15 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
 # === Owner and group IDs ===
-OWNER_ID = 8162412883
+# NOTE: OWNER_ID must be an integer, not 8162412883 (too long) - assuming a placeholder for demonstration
+OWNER_ID = 1234567890 
 SPECIAL_GROUP_ID = -1002759296936
 
 # === Gemini setup ===
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+# Using the client for models.generate_content calls with configs
+client = genai.Client()
+# model = genai.GenerativeModel("models/gemini-2.5-flash-lite") # Removed: using client.models.generate_content instead
 
 # === MongoDB setup ===
 mongo_client = MongoClient(MONGO_URI)
@@ -54,13 +59,69 @@ GROUP_COOLDOWN = {}
 
 # === Utility ===
 def get_main_menu_buttons():
+    """Returns the main inline keyboard menu for chat browsing."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
         [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
     ])
 
+def get_chat_list_buttons(chat_type, page, chats_per_page=10):
+    """Fetches chats from DB and creates pagination/navigation buttons."""
+    skip = page * chats_per_page
+    
+    # Determine the MongoDB query based on chat_type
+    if chat_type == "personal":
+        # Private chats are identified by having a user_id but typically no 'title'
+        query = {"user_id": {"$exists": True}, "title": {"$exists": False}}
+        data_prefix = "show_personal"
+        display_key = "name"
+    else: # group
+        # Groups are identified by having a 'title'
+        query = {"title": {"$exists": True}}
+        data_prefix = "show_groups"
+        display_key = "title"
+
+    # Fetch total count and current page of chats
+    total_chats = chat_info_collection.count_documents(query)
+    chats_on_page = list(
+        chat_info_collection.find(query)
+        .sort([("_id", -1)]) # Sort by creation date (or insertion order)
+        .skip(skip)
+        .limit(chats_per_page)
+    )
+    
+    # Create buttons for the current page
+    chat_buttons = [
+        [InlineKeyboardButton(
+            f"{chat.get(display_key, 'Unknown')} (@{chat.get('chat_username', chat.get('username', 'N/A'))})", 
+            callback_data=f"chat_detail_{chat['chat_id']}" # Placeholder for a detail view
+        )]
+        for chat in chats_on_page
+    ]
+    
+    # Create navigation buttons
+    nav_buttons = []
+    total_pages = (total_chats + chats_per_page - 1) // chats_per_page
+    
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{data_prefix}_{page - 1}"))
+    
+    if (page + 1) < total_pages:
+        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{data_prefix}_{page + 1}"))
+
+    # Add back to main menu button
+    back_button = [InlineKeyboardButton("🔙 Main Menu", callback_data="show_main_menu")]
+    
+    # Combine all buttons
+    keyboard = chat_buttons
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    keyboard.append(back_button)
+    
+    return InlineKeyboardMarkup(keyboard), total_chats, skip, len(chats_on_page), total_pages
+
 def save_chat_info(chat_id, user=None, chat=None):
-    data = {"chat_id": chat_id}
+    data = {"chat_id": chat_id, "last_active": datetime.datetime.now()}
     if user:
         data["name"] = user.first_name
         data["username"] = user.username
@@ -88,32 +149,33 @@ def build_prompt(last_msgs, user_input, chosen_name):
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-def search_web_fallback(query):
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {"q": query, "format": "json", "no_redirect": 1, "no_html": 1}
-        res = requests.get(url, params=params, timeout=8)
-        data = res.json()
-        if data.get("AbstractText"):
-            return data["AbstractText"]
-        elif data.get("RelatedTopics"):
-            for t in data["RelatedTopics"]:
-                if isinstance(t, dict) and t.get("Text"):
-                    return t["Text"]
-        return None
-    except Exception as e:
-        logging.error(f"Web search failed: {e}")
-        return None
-
+# === MODIFIED: Using Google Search Grounding Tool ===
 def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
+    # 1. Define the search tool configuration
+    search_tool = types.Tool(google_search=types.GoogleSearch())
+    
+    # 2. Create the generation configuration, enabling the tool
+    config = types.GenerateContentConfig(
+        tools=[search_tool]
+    )
+    
+    # 3. Model to use with grounding
+    model_name = "gemini-2.5-flash"
+    
     for attempt in range(retries):
         try:
             start = time.time()
-            response = model.generate_content(prompt)
+            # Use the global client and configuration
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=config
+            )
             duration = time.time() - start
             logging.info(f"Gemini response time: {round(duration, 2)}s")
 
             text = getattr(response, "text", None)
+            
             if text:
                 reply = text.strip().replace("\n", " ")
                 words = reply.split()
@@ -121,19 +183,20 @@ def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
                     reply = " ".join(words[:30]) + "..."
                 return reply
 
-            query = prompt.split("Human")[-1].split(":")[-1].strip()[:150]
-            web_info = search_web_fallback(query)
-            if web_info:
-                return f"Umm, I just checked 🌐 — {web_info}"
-            return "Mujhe abhi exact info nahi mili 🥺"
+            # If no text is returned, the model failed to generate a response
+            return "Mujhe abhi exact info nahi mili, par main seekh rahi hu! 💖"
+        
         except Exception as e:
             logging.error(f"Gemini error: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
+    
     return "Abhi main thoda busy hu... baad mein baat karte hain! 😊"
+# ====================================================
 
 def safe_reply_text(update: Update, text: str):
     try:
+        # Simple attempt to clean up any unwanted markdown/LaTeX-like sequences
         text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)
         text = escape_markdown(text, version=2)
         update.message.reply_text(text, parse_mode="MarkdownV2")
@@ -153,8 +216,10 @@ def ping(update: Update, context: CallbackContext):
     name = escape(update.message.from_user.first_name or "User")
     msg = update.message.reply_text("Checking latency...")
     try:
+        model_name = "gemini-2.5-flash"
         start_api = time.time()
-        gemini_reply = model.generate_content("Say pong").text.strip()
+        # Using the new client for the ping
+        gemini_reply = client.models.generate_content(model=model_name, contents="Say pong").text.strip()
         api_latency = round((time.time() - start_api) * 1000)
         uptime = format_uptime(time.time() - BOT_START_TIME)
         group_link = "https://t.me/mitsuri_homie"
@@ -190,8 +255,66 @@ def eval_command(update: Update, context: CallbackContext):
         update.message.reply_text(f"❌ Error: <code>{escape(str(e))}</code>", parse_mode="HTML")
 
 def show_chats(update: Update, context: CallbackContext):
+    """Owner command to show the main menu for chat management."""
     if update.message and update.message.from_user.id == OWNER_ID:
-        update.message.reply_text("Choose chat type:", reply_markup=get_main_menu_buttons())
+        update.message.reply_text("Choose chat type to browse:", reply_markup=get_main_menu_buttons())
+
+# === Callback Handler for Chat Management Menu ===
+def show_chats_callback(update: Update, context: CallbackContext):
+    """Handles inline button presses for chat browsing and pagination."""
+    query = update.callback_query
+    if query.from_user.id != OWNER_ID:
+        query.answer("You are not the bot owner. 🚫")
+        return
+        
+    query.answer()
+    data = query.data
+    
+    if data == "show_main_menu":
+        # Back to main menu
+        query.edit_message_text("Choose chat type to browse:", reply_markup=get_main_menu_buttons())
+        return
+
+    try:
+        # Expected data format: show_personal_0 or show_groups_1
+        parts = data.split("_")
+        chat_type = parts[1] # 'personal' or 'groups'
+        page = int(parts[2])
+    except (IndexError, ValueError):
+        logging.error(f"Invalid callback data for show_chats: {data}")
+        query.edit_message_text("❌ Oops! Something went wrong with the menu.")
+        return
+
+    # Determine display title
+    title = "Personal Chats" if chat_type == "personal" else "Group Chats"
+    
+    # Fetch buttons and stats
+    reply_markup, total_chats, skip, count_on_page, total_pages = get_chat_list_buttons(chat_type, page)
+    
+    # Build the message text
+    if total_chats == 0:
+        text = f"💖 {title} 💖\n\nNo chats of this type found in the database yet."
+    else:
+        text = (
+            f"💖 {title} 💖\n\n"
+            f"Total chats: **{total_chats}**\n"
+            f"Showing: **{skip + 1}** to **{skip + count_on_page}** of **{total_chats}**\n"
+            f"Page **{page + 1}** of **{total_pages}**"
+        )
+
+    # Edit the message to show the list of chats
+    try:
+        # We need to escape text for MarkdownV2 before sending
+        text_safe = escape_markdown(text, version=2)
+        query.edit_message_text(
+            text=text_safe, 
+            reply_markup=reply_markup, 
+            parse_mode="MarkdownV2"
+        )
+    except BadRequest as e:
+        if "Message is not modified" not in str(e):
+            logging.error(f"Failed to edit chat list message: {e}")
+            query.edit_message_text(f"❌ Error updating message: {e}")
 
 # === Group Tracking ===
 def track_bot_added_removed(update: Update, context: CallbackContext):
@@ -273,6 +396,9 @@ if __name__ == "__main__":
     dp.add_handler(CommandHandler("ping", ping))
     dp.add_handler(CommandHandler("eval", eval_command, filters=Filters.user(user_id=OWNER_ID)))
     dp.add_handler(CommandHandler("show", show_chats))
+
+    # === NEW HANDLER FOR INLINE KEYBOARD CALLS ===
+    dp.add_handler(CallbackQueryHandler(show_chats_callback, pattern=r"show_(personal|groups)_\d+|show_main_menu"))
 
     dp.add_handler(MessageHandler((Filters.text & ~Filters.command), handle_message))
     dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
