@@ -3,10 +3,9 @@ import time
 import datetime
 import logging
 import re
-import requests
+import html
 from dotenv import load_dotenv
-from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Updater,
     CommandHandler,
@@ -17,392 +16,367 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 from telegram.error import Unauthorized, BadRequest
-from telegram.utils.helpers import escape_markdown
 from pymongo import MongoClient
-import google-genai as genai
-# === NEW IMPORT FOR GEMINI CONFIGURATION ===
+
+# === NEW GOOGLE GENAI SDK ===
+import google.genai as genai
 from google.genai import types
 
-# === Load environment variables ===
+# === CONFIGURATION ===
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# === Owner and group IDs ===
-# NOTE: OWNER_ID must be an integer, not 8162412883 (too long) - assuming a placeholder for demonstration
-OWNER_ID = 1234567890 
+# ⚠️ REPLACE THIS WITH YOUR NUMERIC ID (Integer)
+OWNER_ID = 8162412883 
 SPECIAL_GROUP_ID = -1002759296936
 
-# === Gemini setup ===
-genai.configure(api_key=GEMINI_API_KEY)
-# Using the client for models.generate_content calls with configs
-client = genai.Client()
-# model = genai.GenerativeModel("models/gemini-2.5-flash-lite") # Removed: using client.models.generate_content instead
+# === SETUP CLIENTS ===
+# 1. Gemini Client
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is missing in environment variables!")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# === MongoDB setup ===
+# 2. MongoDB Client
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["MitsuriDB"]
 chat_info_collection = db["chat_info"]
-chat_info_collection.create_index("chat_id", unique=True)
+try:
+    chat_info_collection.create_index("chat_id", unique=True)
+except Exception:
+    pass
 
-# === Logging ===
+# 3. Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-# === Constants ===
-REQUEST_DELAY = 2
+# === CONSTANTS ===
 BOT_START_TIME = time.time()
-GROUP_COOLDOWN = {}
+GROUP_COOLDOWN = {}  # To prevent spam in groups
 
-# === Utility ===
-def get_main_menu_buttons():
-    """Returns the main inline keyboard menu for chat browsing."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Personal Chats", callback_data="show_personal_0")],
-        [InlineKeyboardButton("👥 Group Chats", callback_data="show_groups_0")]
-    ])
+# ==============================================================================
+# ###                           🛠️ UTILITIES                                ###
+# ==============================================================================
 
-def get_chat_list_buttons(chat_type, page, chats_per_page=10):
-    """Fetches chats from DB and creates pagination/navigation buttons."""
-    skip = page * chats_per_page
-    
-    # Determine the MongoDB query based on chat_type
-    if chat_type == "personal":
-        # Private chats are identified by having a user_id but typically no 'title'
-        query = {"user_id": {"$exists": True}, "title": {"$exists": False}}
-        data_prefix = "show_personal"
-        display_key = "name"
-    else: # group
-        # Groups are identified by having a 'title'
-        query = {"title": {"$exists": True}}
-        data_prefix = "show_groups"
-        display_key = "title"
-
-    # Fetch total count and current page of chats
-    total_chats = chat_info_collection.count_documents(query)
-    chats_on_page = list(
-        chat_info_collection.find(query)
-        .sort([("_id", -1)]) # Sort by creation date (or insertion order)
-        .skip(skip)
-        .limit(chats_per_page)
-    )
-    
-    # Create buttons for the current page
-    chat_buttons = [
-        [InlineKeyboardButton(
-            f"{chat.get(display_key, 'Unknown')} (@{chat.get('chat_username', chat.get('username', 'N/A'))})", 
-            callback_data=f"chat_detail_{chat['chat_id']}" # Placeholder for a detail view
-        )]
-        for chat in chats_on_page
-    ]
-    
-    # Create navigation buttons
-    nav_buttons = []
-    total_pages = (total_chats + chats_per_page - 1) // chats_per_page
-    
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{data_prefix}_{page - 1}"))
-    
-    if (page + 1) < total_pages:
-        nav_buttons.append(InlineKeyboardButton("Next ➡️", callback_data=f"{data_prefix}_{page + 1}"))
-
-    # Add back to main menu button
-    back_button = [InlineKeyboardButton("🔙 Main Menu", callback_data="show_main_menu")]
-    
-    # Combine all buttons
-    keyboard = chat_buttons
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-    keyboard.append(back_button)
-    
-    return InlineKeyboardMarkup(keyboard), total_chats, skip, len(chats_on_page), total_pages
+def format_text_to_html(text):
+    """
+    Converts Gemini's Markdown (**bold**) to Telegram HTML (<b>bold</b>).
+    Also escapes special characters to prevent crashes.
+    """
+    if not text: return ""
+    # 1. Escape HTML reserved chars (<, >, &)
+    text = html.escape(text)
+    # 2. Convert **text** to <b>text</b>
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    # 3. Convert *text* to <i>text</i>
+    text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+    return text
 
 def save_chat_info(chat_id, user=None, chat=None):
+    """Saves or updates chat info in MongoDB."""
     data = {"chat_id": chat_id, "last_active": datetime.datetime.now()}
+    
+    # Store User Info
     if user:
         data["name"] = user.first_name
         data["username"] = user.username
         data["user_id"] = user.id
+    
+    # Store Group/Chat Info
     if chat and chat.type != "private":
         data["title"] = chat.title
-        if chat.username:
-            data["chat_username"] = chat.username
+        data["type"] = "group"
+    else:
+        data["type"] = "personal"
+        
     chat_info_collection.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
+
+def safe_reply_html(update: Update, text: str):
+    """Safely replies using HTML mode."""
+    try:
+        formatted = format_text_to_html(text)
+        update.message.reply_text(formatted, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Reply failed: {e}")
+        # Fallback: Send raw text if HTML fails
+        try:
+            update.message.reply_text(text)
+        except:
+            pass
+
+# ==============================================================================
+# ###                           🧠 AI LOGIC                                 ###
+# ==============================================================================
 
 def build_prompt(last_msgs, user_input, chosen_name):
     system_instructions = """
-- Tum Mitsuri Kanroji ho (Demon Slayer se).
-- Tum Hinglish mein short, cute aur thodi bubbly tone mein baat karti ho (under 30 words).
-- Kabhi kabhi casually bolo ki tum [Shashank](https://t.me/shashankxingh) ki dost ho, par har baar nahi.
-- *giggles* ya *actions* allowed nahi hain.
-- Agar kuch nahi pata ho, web se concise info lao.
+You are Mitsuri Kanroji (from Demon Slayer).
+- Tone: Romantic, bubbly, emotional, and very friendly (Hashira energy).
+- Language: Hinglish (Hindi + English mix).
+- Length: Keep it short (under 40 words).
+- Context: If asked about yourself, mention you are the Love Hashira.
+- Format: Use **bold** for emphasis. Do NOT use markdown headers (#).
 """
     prompt = system_instructions.strip() + "\n\n"
+    # Add conversation history
     for role, msg in last_msgs:
         if role == "user":
-            prompt += f"Human ({chosen_name}): {msg}\n"
+            prompt += f"Human: {msg}\n"
         elif role == "bot":
             prompt += f"Mitsuri: {msg}\n"
     prompt += f"Human ({chosen_name}): {user_input}\nMitsuri:"
     return prompt
 
-# === MODIFIED: Using Google Search Grounding Tool ===
-def generate_with_retry(prompt, retries=2, delay=REQUEST_DELAY):
-    # 1. Define the search tool configuration
+def generate_with_retry(prompt, retries=2):
+    # Enable Google Search Grounding
     search_tool = types.Tool(google_search=types.GoogleSearch())
-    
-    # 2. Create the generation configuration, enabling the tool
-    config = types.GenerateContentConfig(
-        tools=[search_tool]
-    )
-    
-    # 3. Model to use with grounding
+    config = types.GenerateContentConfig(tools=[search_tool])
     model_name = "gemini-2.5-flash"
     
-    for attempt in range(retries):
+    for _ in range(retries):
         try:
-            start = time.time()
-            # Use the global client and configuration
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt,
                 config=config
             )
-            duration = time.time() - start
-            logging.info(f"Gemini response time: {round(duration, 2)}s")
-
             text = getattr(response, "text", None)
-            
             if text:
-                reply = text.strip().replace("\n", " ")
-                words = reply.split()
-                if len(words) > 30:
-                    reply = " ".join(words[:30]) + "..."
-                return reply
-
-            # If no text is returned, the model failed to generate a response
-            return "Mujhe abhi exact info nahi mili, par main seekh rahi hu! 💖"
-        
+                return text.strip()
         except Exception as e:
-            logging.error(f"Gemini error: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
+            logging.error(f"Gemini Error: {e}")
+            time.sleep(1)
+            
+    return "Mochi mochi! I'm a bit dizzy right now... 🍥"
+
+# ==============================================================================
+# ##############################################################################
+# ###                     👑 COMPLETE ADMIN SECTION 👑                       ###
+# ##############################################################################
+# ==============================================================================
+
+def owner_only(func):
+    """Decorator to ensure only the owner can run these commands."""
+    def wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+        if update.effective_user.id != OWNER_ID:
+            return # Ignore non-owners silently
+        return func(update, context, *args, **kwargs)
+    return wrapper
+
+# --- 1. Statistics ---
+@owner_only
+def stats_command(update: Update, context: CallbackContext):
+    users = chat_info_collection.count_documents({"type": "personal"})
+    groups = chat_info_collection.count_documents({"type": "group"})
+    msg = (
+        f"<b>📊 Mitsuri Database Stats</b>\n\n"
+        f"👤 <b>Users:</b> {users}\n"
+        f"👥 <b>Groups:</b> {groups}\n"
+        f"📈 <b>Total:</b> {users + groups}"
+    )
+    update.message.reply_text(msg, parse_mode="HTML")
+
+# --- 2. Broadcast ---
+@owner_only
+def broadcast_command(update: Update, context: CallbackContext):
+    """Usage: /broadcast [Message]"""
+    message = " ".join(context.args)
+    if not message:
+        update.message.reply_text("❌ Usage: <code>/broadcast Your Message</code>", parse_mode="HTML")
+        return
+
+    status_msg = update.message.reply_text("🚀 <b>Broadcast started...</b>", parse_mode="HTML")
     
-    return "Abhi main thoda busy hu... baad mein baat karte hain! 😊"
-# ====================================================
+    # Fetch only IDs to save memory
+    cursor = chat_info_collection.find({}, {"chat_id": 1})
+    success = 0
+    blocked = 0
+    failed = 0
+    
+    for doc in cursor:
+        try:
+            context.bot.send_message(
+                chat_id=doc["chat_id"],
+                text=f"📢 <b>Announcement:</b>\n\n{format_text_to_html(message)}",
+                parse_mode="HTML"
+            )
+            success += 1
+            time.sleep(0.05) # Avoid FloodWait
+        except Unauthorized:
+            blocked += 1
+        except Exception:
+            failed += 1
+            
+    text = (
+        f"✅ <b>Broadcast Report</b>\n\n"
+        f"📨 Sent: {success}\n"
+        f"🚫 Blocked: {blocked}\n"
+        f"❌ Failed: {failed}"
+    )
+    context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=text, parse_mode="HTML")
 
-def safe_reply_text(update: Update, text: str):
-    try:
-        # Simple attempt to clean up any unwanted markdown/LaTeX-like sequences
-        text = re.sub(r"\\[a-zA-Z]+\{([^}]*)\}", r"\1", text)
-        text = escape_markdown(text, version=2)
-        update.message.reply_text(text, parse_mode="MarkdownV2")
-    except (Unauthorized, BadRequest) as e:
-        logging.warning(f"Reply failed: {e}")
-
-def format_uptime(seconds):
-    return str(datetime.timedelta(seconds=int(seconds)))
-
-# === Commands ===
-def start(update: Update, context: CallbackContext):
-    safe_reply_text(update, "Hii~ Mitsuri is here 💖 How can I help you today?")
-
-def ping(update: Update, context: CallbackContext):
-    if not update.message:
-        return
-    name = escape(update.message.from_user.first_name or "User")
-    msg = update.message.reply_text("Checking latency...")
-    try:
-        model_name = "gemini-2.5-flash"
-        start_api = time.time()
-        # Using the new client for the ping
-        gemini_reply = client.models.generate_content(model=model_name, contents="Say pong").text.strip()
-        api_latency = round((time.time() - start_api) * 1000)
-        uptime = format_uptime(time.time() - BOT_START_TIME)
-        group_link = "https://t.me/mitsuri_homie"
-
-        reply = (
-            f"╭───[ 🌸 <b>Mitsuri Ping Report</b> ]───\n"
-            f"├ Hello <b>{name}</b>\n"
-            f"├ Group: <a href='{group_link}'>@the_jellybeans</a>\n"
-            f"├ Ping: <b>{gemini_reply}</b>\n"
-            f"├ API Latency: <b>{api_latency} ms</b>\n"
-            f"├ Uptime: <b>{uptime}</b>\n"
-            f"╰─ I'm here and responsive."
-        )
-        context.bot.edit_message_text(
-            chat_id=msg.chat_id,
-            message_id=msg.message_id,
-            text=reply,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
-        logging.error(f"/ping error: {e}")
-        msg.edit_text("Something went wrong while checking ping.")
-
+# --- 3. Eval (Code Execution) ---
+@owner_only
 def eval_command(update: Update, context: CallbackContext):
-    if update.message.from_user.id != OWNER_ID:
-        return
     code = " ".join(context.args)
+    if not code: return
     try:
         result = str(eval(code))
-        update.message.reply_text(f"✅ <b>Result:</b>\n<code>{escape(result)}</code>", parse_mode="HTML")
+        if len(result) > 4000: result = result[:4000] + "..."
+        update.message.reply_text(f"🐍 <b>Output:</b>\n<pre>{html.escape(result)}</pre>", parse_mode="HTML")
     except Exception as e:
-        update.message.reply_text(f"❌ Error: <code>{escape(str(e))}</code>", parse_mode="HTML")
+        update.message.reply_text(f"❌ <b>Error:</b>\n<pre>{html.escape(str(e))}</pre>", parse_mode="HTML")
 
-def show_chats(update: Update, context: CallbackContext):
-    """Owner command to show the main menu for chat management."""
-    if update.message and update.message.from_user.id == OWNER_ID:
-        update.message.reply_text("Choose chat type to browse:", reply_markup=get_main_menu_buttons())
+# --- 4. Admin Panel UI ---
+@owner_only
+def admin_panel(update: Update, context: CallbackContext):
+    """Opens the Admin GUI."""
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Users", callback_data="admin_view_personal_0"),
+         InlineKeyboardButton("👥 Groups", callback_data="admin_view_group_0")],
+        [InlineKeyboardButton("❌ Close", callback_data="admin_close")]
+    ])
+    update.message.reply_text("<b>👑 Admin Control Panel</b>", reply_markup=keyboard, parse_mode="HTML")
 
-# === Callback Handler for Chat Management Menu ===
-def show_chats_callback(update: Update, context: CallbackContext):
-    """Handles inline button presses for chat browsing and pagination."""
+def get_chat_page(chat_type, page):
+    """Helper for pagination."""
+    PER_PAGE = 5
+    skip = page * PER_PAGE
+    query = {"type": chat_type}
+    total = chat_info_collection.count_documents(query)
+    
+    cursor = chat_info_collection.find(query).sort("_id", -1).skip(skip).limit(PER_PAGE)
+    
+    buttons = []
+    for chat in cursor:
+        label = chat.get("title") if chat_type == "group" else chat.get("name")
+        buttons.append([InlineKeyboardButton(f"{label or 'Unknown'} ({chat['chat_id']})", callback_data="admin_noop")])
+    
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"admin_view_{chat_type}_{page-1}"))
+    nav.append(InlineKeyboardButton("🔙 Back", callback_data="admin_home"))
+    if (skip + PER_PAGE) < total:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"admin_view_{chat_type}_{page+1}"))
+    
+    buttons.append(nav)
+    return f"<b>Browsing {chat_type.title()}s</b> (Total: {total})", InlineKeyboardMarkup(buttons)
+
+def admin_callback_handler(update: Update, context: CallbackContext):
+    """Handles button clicks in Admin Panel."""
     query = update.callback_query
     if query.from_user.id != OWNER_ID:
-        query.answer("You are not the bot owner. 🚫")
+        query.answer("🚫")
         return
-        
-    query.answer()
+
     data = query.data
-    
-    if data == "show_main_menu":
-        # Back to main menu
-        query.edit_message_text("Choose chat type to browse:", reply_markup=get_main_menu_buttons())
-        return
-
-    try:
-        # Expected data format: show_personal_0 or show_groups_1
-        parts = data.split("_")
-        chat_type = parts[1] # 'personal' or 'groups'
-        page = int(parts[2])
-    except (IndexError, ValueError):
-        logging.error(f"Invalid callback data for show_chats: {data}")
-        query.edit_message_text("❌ Oops! Something went wrong with the menu.")
-        return
-
-    # Determine display title
-    title = "Personal Chats" if chat_type == "personal" else "Group Chats"
-    
-    # Fetch buttons and stats
-    reply_markup, total_chats, skip, count_on_page, total_pages = get_chat_list_buttons(chat_type, page)
-    
-    # Build the message text
-    if total_chats == 0:
-        text = f"💖 {title} 💖\n\nNo chats of this type found in the database yet."
+    if data == "admin_close":
+        query.message.delete()
+    elif data == "admin_home":
+        # Return to main menu logic (reused from admin_panel but edited)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👤 Users", callback_data="admin_view_personal_0"),
+             InlineKeyboardButton("👥 Groups", callback_data="admin_view_group_0")],
+            [InlineKeyboardButton("❌ Close", callback_data="admin_close")]
+        ])
+        query.edit_message_text("<b>👑 Admin Control Panel</b>", reply_markup=keyboard, parse_mode="HTML")
+    elif data.startswith("admin_view_"):
+        parts = data.split("_") # admin, view, type, page
+        text, markup = get_chat_page(parts[2], int(parts[3]))
+        try:
+            query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+        except BadRequest:
+            query.answer()
     else:
-        text = (
-            f"💖 {title} 💖\n\n"
-            f"Total chats: **{total_chats}**\n"
-            f"Showing: **{skip + 1}** to **{skip + count_on_page}** of **{total_chats}**\n"
-            f"Page **{page + 1}** of **{total_pages}**"
-        )
+        query.answer()
 
-    # Edit the message to show the list of chats
-    try:
-        # We need to escape text for MarkdownV2 before sending
-        text_safe = escape_markdown(text, version=2)
-        query.edit_message_text(
-            text=text_safe, 
-            reply_markup=reply_markup, 
-            parse_mode="MarkdownV2"
-        )
-    except BadRequest as e:
-        if "Message is not modified" not in str(e):
-            logging.error(f"Failed to edit chat list message: {e}")
-            query.edit_message_text(f"❌ Error updating message: {e}")
+# ==============================================================================
+# ###                       STANDARD BOT HANDLERS                            ###
+# ==============================================================================
 
-# === Group Tracking ===
-def track_bot_added_removed(update: Update, context: CallbackContext):
-    cmu = update.my_chat_member
-    if not cmu or cmu.new_chat_member.user.id != context.bot.id:
-        return
-    user, chat = cmu.from_user, cmu.chat
-    if cmu.old_chat_member.status in ["left", "kicked"] and cmu.new_chat_member.status in ["member", "administrator"]:
-        msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> added Mitsuri to <b>{escape(chat.title)}</b>."
-        save_chat_info(chat.id, user=user, chat=chat)
-    elif cmu.new_chat_member.status in ["left", "kicked"]:
-        msg = f"<a href='tg://user?id={user.id}'>{escape(user.first_name)}</a> removed Mitsuri from <b>{escape(chat.title)}</b>."
-    else:
-        return
-    try:
-        context.bot.send_message(chat_id=SPECIAL_GROUP_ID, text=msg, parse_mode="HTML")
-    except BadRequest as e:
-        logging.warning(f"Group event log failed: {e}")
+def start(update: Update, context: CallbackContext):
+    save_chat_info(update.effective_chat.id, update.effective_user, update.effective_chat)
+    safe_reply_html(update, "Hii~ I am <b>Mitsuri Kanroji</b>! 💖\nI am the Love Hashira. How can I help you?")
 
-# === Message Handling ===
+def ping(update: Update, context: CallbackContext):
+    st = time.time()
+    msg = update.message.reply_text("<i>Checking...</i>", parse_mode="HTML")
+    lat = round((time.time() - st) * 1000)
+    context.bot.edit_message_text(
+        chat_id=msg.chat_id, message_id=msg.message_id,
+        text=f"🌸 <b>Pong!</b>\nLatency: <code>{lat}ms</code>", parse_mode="HTML"
+    )
+
 def handle_message(update: Update, context: CallbackContext):
-    if not update.message or not update.message.text:
-        return
-
-    user_input = update.message.text.strip()
+    if not update.message or not update.message.text: return
+    
+    text = update.message.text.strip()
     user = update.message.from_user
     chat = update.message.chat
-    chat_id = chat.id
-    chat_type = chat.type
-    chosen_name = (user.first_name or user.username or "User")[:25]
+    
+    # 1. Determine if bot should reply
+    should_reply = False
+    if chat.type == "private":
+        should_reply = True
+    else:
+        # Group logic: Reply to mentions, replies, or "Mitsuri" keyword
+        is_reply = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        is_mention = f"@{context.bot.username}" in text
+        is_call = "mitsuri" in text.lower()
+        if is_reply or is_mention or is_call:
+            should_reply = True
+            # Clean input
+            text = re.sub(r"(?i)mitsuri", "", text)
+            text = text.replace(f"@{context.bot.username}", "").strip()
 
-    # group triggers
-    if chat_type in ["group", "supergroup"]:
-        lower_text = user_input.lower()
-        mentioned = (
-            re.search(r"\bmitsuri\b", lower_text)
-            or (context.bot.username and f"@{context.bot.username.lower()}" in lower_text)
-            or (update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id)
-        )
-        if not mentioned:
-            return
-        user_input = re.sub(rf"@{re.escape(context.bot.username)}", "", user_input, flags=re.I)
-        user_input = re.sub(r"(?i)\bmitsuri\b", "", user_input).strip()
-        if not user_input:
-            user_input = "hi"
+    if not should_reply: return
+
+    # 2. Save info & Cooldown
+    save_chat_info(chat.id, user, chat)
+    if chat.type != "private":
         now = time.time()
-        if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 5:
+        if chat.id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat.id] < 3:
             return
-        GROUP_COOLDOWN[chat_id] = now
+        GROUP_COOLDOWN[chat.id] = now
 
-    save_chat_info(chat_id, user=user, chat=chat)
+    # 3. Chat History (Short term memory)
     history = context.chat_data.setdefault("history", [])
-    history.append(("user", user_input))
-    if len(history) > 6:
-        history = history[-6:]
+    history.append(("user", text))
+    if len(history) > 6: history = history[-6:]
 
-    prompt = build_prompt(history, user_input, chosen_name)
-    try:
-        context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    except Exception:
-        pass
-
+    # 4. Generate & Send
+    prompt = build_prompt(history, text, user.first_name)
+    context.bot.send_chat_action(chat_id=chat.id, action="typing")
+    
     reply = generate_with_retry(prompt)
+    
     history.append(("bot", reply))
     context.chat_data["history"] = history
-    safe_reply_text(update, reply)
-
-# === Error Handling ===
-def error_handler(update: object, context: CallbackContext):
-    logging.error(f"Update: {update}")
-    logging.error(f"Context error: {context.error}")
+    safe_reply_html(update, reply)
 
 # === MAIN ===
 if __name__ == "__main__":
+    print("🌸 Mitsuri Bot is Starting...")
+    
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
+    # 1. Admin Handlers
+    dp.add_handler(CommandHandler("admin", admin_panel))
+    dp.add_handler(CommandHandler("stats", stats_command))
+    dp.add_handler(CommandHandler("broadcast", broadcast_command))
+    dp.add_handler(CommandHandler("eval", eval_command))
+    dp.add_handler(CallbackQueryHandler(admin_callback_handler, pattern=r"^admin_"))
+
+    # 2. Public Handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("ping", ping))
-    dp.add_handler(CommandHandler("eval", eval_command, filters=Filters.user(user_id=OWNER_ID)))
-    dp.add_handler(CommandHandler("show", show_chats))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    # === NEW HANDLER FOR INLINE KEYBOARD CALLS ===
-    dp.add_handler(CallbackQueryHandler(show_chats_callback, pattern=r"show_(personal|groups)_\d+|show_main_menu"))
-
-    dp.add_handler(MessageHandler((Filters.text & ~Filters.command), handle_message))
-    dp.add_handler(ChatMemberHandler(track_bot_added_removed, ChatMemberHandler.MY_CHAT_MEMBER))
-    dp.add_error_handler(error_handler)
-
+    # 3. Start
     updater.start_polling()
+    print("✅ Bot is Online!")
     updater.idle()
