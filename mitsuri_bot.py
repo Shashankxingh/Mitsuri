@@ -134,12 +134,9 @@ def generate_with_retry(prompt, retries=2):
     # Enable Google Search Grounding
     search_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(tools=[search_tool])
-    # Old line:
-# model_name = "gemini-2.5-flash-lite"
-
-# New line (Update this!):
-model_name = "gemini-3-flash"
-
+    
+    # ✅ UPDATED: Using the new Gemini 3 Flash model
+    model_name = "gemini-3-flash"
     
     for _ in range(retries):
         try:
