@@ -112,12 +112,13 @@ def safe_reply_html(update: Update, text: str):
 # ==============================================================================
 
 def build_prompt(last_msgs, user_input, chosen_name):
+    # 💡 LITE MODEL OPTIMIZATION: Stricter personality rules
     system_instructions = """
 You are Mitsuri Kanroji (from Demon Slayer).
-- Tone: Romantic, bubbly, emotional, and very friendly (Hashira energy).
+- Tone: EXTREMELY Romantic, bubbly, emotional, and very friendly. Use emojis! 💖
+- Identity: You are the Love Hashira. Never forget this.
 - Language: Hinglish (Hindi + English mix).
-- Length: Keep it short (under 15 words).
-- Context: If asked about yourself, mention you are the Love Hashira.
+- Length: Keep it short (under 20 words).
 - Format: Use **bold** for emphasis. Do NOT use markdown headers (#).
 """
     prompt = system_instructions.strip() + "\n\n"
@@ -135,8 +136,8 @@ def generate_with_retry(prompt, retries=2):
     search_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(tools=[search_tool])
     
-    # ✅ UPDATED: Using the new Gemini 3 Flash model
-    model_name = "gemini-3-flash"
+    # ✅ USING FLASH-LITE (Best for Free Tokens & High Speed)
+    model_name = "gemini-2.5-flash-lite"
     
     for _ in range(retries):
         try:
@@ -150,6 +151,9 @@ def generate_with_retry(prompt, retries=2):
                 return text.strip()
         except Exception as e:
             logging.error(f"Gemini Error: {e}")
+            # If it's the last retry, return the ACTUAL error to Telegram for debugging
+            if _ == retries - 1:
+                return f"😵‍💫 <b>Error:</b> {str(e)}"
             time.sleep(1)
             
     return "Mochi mochi! I'm a bit dizzy right now... 🍥"
