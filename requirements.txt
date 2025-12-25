@@ -1,4 +1,6 @@
-python-telegram-bot==13.15
-google-genai
-python-dotenv
-pymongo
+python-telegram-bot==20.7
+groq==0.4.2
+pymongo==4.6.1
+python-dotenv==1.0.0
+flask==3.0.0
+gunicorn==21.2.0
