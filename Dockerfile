@@ -1,25 +1,22 @@
-# Use an official Python runtime as a parent image
+# Use an official Python runtime
 FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# Set environment variables to keep Python efficient
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Create working directory
 WORKDIR /app
 
-# Install dependencies
+# 1. Install dependencies first (for caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
+# 2. Copy the rest of the code
 COPY . .
 
-# Install tini to handle multiple processes
-RUN apt-get update && apt-get install -y tini
+# Render automatically sets the PORT environment variable.
+# The Flask app inside your code will automatically listen to it.
 
-# Expose a dummy port to satisfy Render's requirement for an open port
-EXPOSE 10000
-
-# Start both the dummy HTTP server and the bot (Mitsuri)
-CMD ["tini", "--", "sh", "-c", "python3 -m http.server 10000 & python3 mitsuri_bot.py"]
+# 3. Start the bot (The script handles both the Bot and the Web Server)
+CMD ["python", "mitsuri_bot.py"]
