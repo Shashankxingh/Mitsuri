@@ -6,6 +6,7 @@ import html
 import re
 import time
 from threading import Thread
+from collections import defaultdict
 
 # === MODERN IMPORTS (PTB v20+) ===
 from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from groq import AsyncGroq
 from dotenv import load_dotenv
 from flask import Flask
@@ -28,30 +30,53 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+OWNER_ID = os.getenv("OWNER_ID")
 
 # ⚠️ YOUR CONFIG
-OWNER_ID = int(os.getenv("OWNER_ID", "0")) 
 ADMIN_GROUP_ID = -1002759296936  # Admin Commands ONLY work here
 
+# Model Configuration
+MODEL_DM = "llama-3.3-70b-versatile"  # High quality for private chats
+MODEL_GROUP = "llama-3.1-8b-instant"  # Fast for groups
+
+# === VALIDATION ===
+if not GROQ_API_KEY or not TELEGRAM_BOT_TOKEN or not MONGO_URI or not OWNER_ID:
+    raise ValueError("❌ Missing required environment variables! Check your .env file.")
+
+try:
+    OWNER_ID = int(OWNER_ID)
+except ValueError:
+    raise ValueError("❌ OWNER_ID must be a valid integer!")
+
 # === SETUP ===
-# Enhanced Logging Setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
-# We quiet down 'httpx' so it doesn't spam your logs with every network request
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-if not GROQ_API_KEY or not TELEGRAM_BOT_TOKEN:
-    logger.critical("❌ Missing API Keys! Please check your .env file.")
-
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-mongo_client = MongoClient(MONGO_URI)
+
+# MongoDB Connection with validation
+try:
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    # Test connection
+    mongo_client.admin.command('ping')
+    logger.info("✅ MongoDB connected successfully!")
+except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+    logger.critical(f"❌ MongoDB connection failed: {e}")
+    raise
+
 db = mongo_client["MitsuriDB"]
 chat_collection = db["chat_info"]
+history_collection = db["chat_history"]
 
+# Rate limiting and cooldown
 GROUP_COOLDOWN = {}
+USER_RATE_LIMIT = defaultdict(list)  # {user_id: [timestamps]}
+RATE_LIMIT_WINDOW = 60  # 1 minute
+RATE_LIMIT_MAX = 10  # 10 messages per minute per user
 
 # ==============================================================================
 # ###                       🌐 FLASK KEEP-ALIVE                              ###
@@ -64,10 +89,11 @@ def health_check():
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    # Suppress Flask startup logs to keep console clean
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    app.run(host='0.0.0.0', port=port)
+    import logging as flask_logging
+    log = flask_logging.getLogger('werkzeug')
+    log.disabled = True
+    app.logger.disabled = True
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 # ==============================================================================
 # ###                           🛠️ UTILITIES                                ###
@@ -80,6 +106,20 @@ def format_text_to_html(text):
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
     text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
     return text
+
+def check_rate_limit(user_id):
+    """Check if user has exceeded rate limit"""
+    now = time.time()
+    timestamps = USER_RATE_LIMIT[user_id]
+    
+    # Remove old timestamps outside the window
+    timestamps[:] = [ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW]
+    
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        return False  # Rate limited
+    
+    timestamps.append(now)
+    return True  # OK to proceed
 
 def save_user(update: Update):
     try:
@@ -99,20 +139,63 @@ def save_user(update: Update):
             {"$set": data}, 
             upsert=True
         )
-        # Log new user interaction (Debug level to avoid spam, or Info if you prefer)
         logger.debug(f"📝 User saved/updated: {chat.id}")
     except Exception as e:
         logger.error(f"❌ DB Error in save_user: {e}")
+
+def get_chat_history(chat_id, limit=6):
+    """Retrieve chat history from MongoDB"""
+    try:
+        history_docs = history_collection.find(
+            {"chat_id": chat_id}
+        ).sort("timestamp", -1).limit(limit)
+        
+        history = []
+        for doc in reversed(list(history_docs)):
+            history.append((doc["role"], doc["content"]))
+        return history
+    except Exception as e:
+        logger.error(f"❌ Error retrieving history: {e}")
+        return []
+
+def save_chat_history(chat_id, role, content):
+    """Save chat message to MongoDB"""
+    try:
+        history_collection.insert_one({
+            "chat_id": chat_id,
+            "role": role,
+            "content": content,
+            "timestamp": datetime.datetime.utcnow()
+        })
+        
+        # Keep only last 20 messages per chat
+        count = history_collection.count_documents({"chat_id": chat_id})
+        if count > 20:
+            oldest = history_collection.find(
+                {"chat_id": chat_id}
+            ).sort("timestamp", 1).limit(count - 20)
+            
+            ids_to_delete = [doc["_id"] for doc in oldest]
+            history_collection.delete_many({"_id": {"$in": ids_to_delete}})
+            
+    except Exception as e:
+        logger.error(f"❌ Error saving history: {e}")
 
 # ==============================================================================
 # ###                           🧠 AI LOGIC                                  ###
 # ==============================================================================
 
-async def get_groq_response(history, user_input, user_name):
+async def get_groq_response(history, user_input, user_name, is_private=True, retry_count=0):
+    """
+    Generate AI response using different models based on chat type
+    - Private chats: Llama 3.3 70B (better quality)
+    - Group chats: Llama 3.1 8B Instant (faster)
+    """
     system_prompt = (
         "You are Mitsuri Kanroji from Demon Slayer. "
-        "Personality: Romantic, bubbly, uses emojis barely(🍡, 💖). "
-        "Language: Hinglish. Keep it short (max 10 words)."
+        "Personality: Romantic, bubbly, cheerful, and sweet. Use emojis sparingly (🍡, 💖). "
+        "Language: Hinglish (mix of Hindi and English). "
+        "Keep responses concise and natural - around 1-3 sentences. Be warm and friendly!"
     )
     
     messages = [{"role": "system", "content": system_prompt}]
@@ -122,20 +205,31 @@ async def get_groq_response(history, user_input, user_name):
     
     messages.append({"role": "user", "content": f"{user_input} (User: {user_name})"})
 
+    # Select model based on chat type
+    model = MODEL_DM if is_private else MODEL_GROUP
+    model_name = "70B" if is_private else "8B"
+
     try:
-        logger.info(f"🧠 Generating AI response for {user_name}...")
+        logger.info(f"🧠 Generating AI response for {user_name} using {model_name}...")
         completion = await groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model,
             messages=messages,
-            temperature=0.7,
-            max_tokens=300,
+            temperature=0.8,
+            max_tokens=150,
+            top_p=0.9,
         )
         response_text = completion.choices[0].message.content.strip()
-        logger.info("✅ AI Response generated successfully.")
+        logger.info(f"✅ AI Response generated successfully with {model_name}.")
         return response_text
     except Exception as e:
-        logger.error(f"❌ Groq API Error: {e}")
-        return "Ah! Something went wrong... 😵‍💫"
+        logger.error(f"❌ Groq API Error with {model_name} (attempt {retry_count + 1}): {e}")
+        
+        # Retry logic
+        if retry_count < 2:
+            await asyncio.sleep(1)
+            return await get_groq_response(history, user_input, user_name, is_private, retry_count + 1)
+        
+        return "Ah! Something went wrong... 😵‍💫 Please try again!"
 
 # ==============================================================================
 # ###                       🤖 BOT HANDLERS                                  ###
@@ -145,36 +239,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     logger.info(f"🚀 /start triggered by {user.first_name} (ID: {user.id})")
     save_user(update)
-    await update.message.reply_html("Hii! I am <b>Mitsuri Kanroji</b>! 💖\nLet's eat mochi together!")
+    
+    welcome_msg = (
+        "Kyaa~! 💖 Hii! I am <b>Mitsuri Kanroji</b>!\n\n"
+        "I love making new friends! Let's chat and eat mochi together! 🍡\n\n"
+        "Use /help to see what I can do~"
+    )
+    await update.message.reply_html(welcome_msg)
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Shows detailed latency stats.
-    Accessible by everyone.
-    """
+    """Shows detailed latency stats"""
     user = update.effective_user
     logger.info(f"🏓 /ping triggered by {user.first_name} (ID: {user.id})")
 
     start_time = time.time()
-    
-    # 1. Send initial message
     msg = await update.message.reply_text("🍡 Pinging...")
-    
     end_time = time.time()
     
-    # 2. Calculate Latency (Bot Response Time)
-    bot_latency = (end_time - start_time) * 1000 # Convert to ms
-    
-    # 3. Calculate API Latency (Approximate distance from Telegram Servers)
-    # Note: This depends on server clock sync
+    bot_latency = (end_time - start_time) * 1000
     msg_timestamp = update.message.date.timestamp()
-    api_latency = (start_time - msg_timestamp) * 1000
-    if api_latency < 0: api_latency = 0 # Prevent negative numbers if clock skewed
+    api_latency = max(0, (start_time - msg_timestamp) * 1000)
+    
+    # Detect chat type for model info
+    chat_type = update.effective_chat.type
+    is_private = chat_type == constants.ChatType.PRIVATE
+    model_info = "🧠 Llama 3.3 70B" if is_private else "⚡ Llama 3.1 8B Instant"
     
     await msg.edit_text(
         f"🏓 <b>Pong!</b>\n\n"
         f"⚡ <b>Bot Latency:</b> <code>{bot_latency:.2f}ms</code>\n"
-        f"📡 <b>API Latency:</b> <code>{api_latency:.2f}ms</code>",
+        f"📡 <b>API Latency:</b> <code>{api_latency:.2f}ms</code>\n"
+        f"🤖 <b>AI Model:</b> {model_info}",
         parse_mode="HTML"
     )
 
@@ -184,12 +279,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     help_text = (
         "🌸 <b>Mitsuri's Help Menu</b> 🌸\n\n"
-        "I am the Love Hashira! Here is what I can do:\n"
-        "🍡 <b>Chat:</b> Reply to me or mention me in groups!\n"
-        "🍡 <b>Private:</b> DM me to talk privately.\n"
-        "🍡 <b>Language:</b> I speak English & Hindi (Hinglish).\n"
-        "🍡 <b>Utility:</b> Use /ping to check speed.\n\n"
-        "<i>Just say 'Hi' to start!</i> 💖"
+        "I am the Love Hashira! Here is what I can do:\n\n"
+        "💬 <b>Chat:</b> Reply to me or mention me in groups!\n"
+        "💌 <b>Private:</b> DM me to talk privately (smarter AI!).\n"
+        "🗣️ <b>Language:</b> I speak Hinglish!\n"
+        "⚡ <b>Utility:</b> Use /ping to check speed.\n\n"
+        "🧠 <b>AI Models:</b>\n"
+        "• DMs: Llama 3.3 70B (high quality)\n"
+        "• Groups: Llama 3.1 8B (super fast)\n\n"
+        "<i>Just say 'Hi' to start chatting!</i> 💖"
     )
 
     if update.effective_user.id == OWNER_ID:
@@ -216,11 +314,17 @@ async def admin_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.message.reply_html(admin_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
+    if not update.message or not update.message.text: 
+        return
     
     text = update.message.text.strip()
     chat_id = update.effective_chat.id
     user = update.effective_user
+    
+    # Check rate limit
+    if not check_rate_limit(user.id):
+        logger.warning(f"⚠️ Rate limit exceeded for user {user.id}")
+        return
     
     should_reply = False
     is_private = update.effective_chat.type == constants.ChatType.PRIVATE
@@ -235,8 +339,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif "mitsuri" in text.lower():
             should_reply = True
 
-    if not should_reply: return
+    if not should_reply: 
+        return
 
+    # Group cooldown
     if not is_private:
         now = time.time()
         if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 3: 
@@ -244,29 +350,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         GROUP_COOLDOWN[chat_id] = now
 
-    # LOG: Incoming message
-    logger.info(f"📩 Message from {user.first_name} (ID: {user.id}) in {chat_id}: {text[:30]}...")
+    model_type = "DM (70B)" if is_private else "Group (8B)"
+    logger.info(f"📩 [{model_type}] Message from {user.first_name} (ID: {user.id}): {text[:30]}...")
 
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     save_user(update)
 
-    history = context.chat_data.get("history", [])
-    response = await get_groq_response(history, text, user.first_name)
+    # Get history from MongoDB
+    history = get_chat_history(chat_id)
     
-    history.append(("user", text))
-    history.append(("assistant", response))
-    if len(history) > 6: history = history[-6:]
-    context.chat_data["history"] = history
+    # Generate response with appropriate model
+    response = await get_groq_response(history, text, user.first_name, is_private=is_private)
+    
+    # Save to history
+    save_chat_history(chat_id, "user", text)
+    save_chat_history(chat_id, "assistant", response)
 
     try:
         await update.message.reply_html(format_text_to_html(response))
-        logger.info(f"📤 Sent reply to {chat_id}")
+        logger.info(f"📤 [{model_type}] Sent reply to {chat_id}")
     except Exception as e:
         logger.error(f"❌ Failed to send reply to {chat_id}: {e}")
-        await update.message.reply_text(response)
+        try:
+            await update.message.reply_text(response)
+        except:
+            logger.error(f"❌ Complete failure to send message to {chat_id}")
 
 # ==============================================================================
-# ###                       👑 ADMIN COMMANDS (SILENT)                       ###
+# ###                       👑 ADMIN COMMANDS                                ###
 # ==============================================================================
 
 def admin_group_only(func):
@@ -286,9 +397,23 @@ def admin_group_only(func):
 @admin_group_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info("📊 Admin requested stats")
-    u_count = chat_collection.count_documents({"type": "private"})
-    g_count = chat_collection.count_documents({"type": {"$ne": "private"}})
-    await update.message.reply_html(f"<b>📊 Stats</b>\n\n👤 Users: {u_count}\n👥 Groups: {g_count}")
+    try:
+        u_count = chat_collection.count_documents({"type": "private"})
+        g_count = chat_collection.count_documents({"type": {"$ne": "private"}})
+        total_msgs = history_collection.count_documents({})
+        
+        await update.message.reply_html(
+            f"<b>📊 Mitsuri's Stats</b>\n\n"
+            f"👤 <b>Users:</b> {u_count}\n"
+            f"👥 <b>Groups:</b> {g_count}\n"
+            f"💬 <b>Total Messages:</b> {total_msgs}\n\n"
+            f"🧠 <b>AI Models:</b>\n"
+            f"• DMs: Llama 3.3 70B\n"
+            f"• Groups: Llama 3.1 8B Instant"
+        )
+    except Exception as e:
+        logger.error(f"❌ Error fetching stats: {e}")
+        await update.message.reply_text("Failed to fetch stats!")
 
 @admin_group_only
 async def cast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -298,36 +423,48 @@ async def cast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info(f"📢 Starting broadcast: {msg[:30]}...")
-    status_msg = await update.message.reply_text("🚀 Sending...")
-    cursor = chat_collection.find({}, {"chat_id": 1})
+    status_msg = await update.message.reply_text("🚀 Sending broadcast...")
     
-    success, failed = 0, 0
-    formatted_msg = format_text_to_html(msg)
-    
-    for doc in cursor:
-        try:
-            await context.bot.send_message(
-                chat_id=doc["chat_id"], 
-                text=formatted_msg, 
-                parse_mode="HTML"
-            )
-            success += 1
-            await asyncio.sleep(0.05) 
-        except Exception:
-            failed += 1
-    
-    logger.info(f"📢 Broadcast finished. Success: {success}, Failed: {failed}")
-    await status_msg.edit_text(f"✅ <b>Done</b>\nSent: {success}\nFailed: {failed}", parse_mode="HTML")
+    try:
+        cursor = chat_collection.find({}, {"chat_id": 1})
+        success, failed = 0, 0
+        formatted_msg = format_text_to_html(msg)
+        
+        for doc in cursor:
+            try:
+                await context.bot.send_message(
+                    chat_id=doc["chat_id"], 
+                    text=formatted_msg, 
+                    parse_mode="HTML"
+                )
+                success += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.debug(f"Failed to send to {doc['chat_id']}: {e}")
+                failed += 1
+        
+        logger.info(f"📢 Broadcast finished. Success: {success}, Failed: {failed}")
+        await status_msg.edit_text(
+            f"✅ <b>Broadcast Complete!</b>\n\n"
+            f"📤 Sent: {success}\n"
+            f"❌ Failed: {failed}", 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"❌ Broadcast error: {e}")
+        await status_msg.edit_text("❌ Broadcast failed!")
 
 # ==============================================================================
 # ###                           🚀 MAIN RUNNER                               ###
 # ==============================================================================
 
 if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
+    # Start Flask in background
+    flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
     logger.info("🌸 Mitsuri Bot is Starting...")
+    logger.info(f"🧠 AI Models: DM={MODEL_DM}, Group={MODEL_GROUP}")
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Public Commands
@@ -343,5 +480,5 @@ if __name__ == "__main__":
     # Messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("🤖 Polling started...")
+    logger.info("🤖 Polling started. Mitsuri is ready! 💖")
     application.run_polling()
