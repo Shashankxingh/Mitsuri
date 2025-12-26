@@ -102,9 +102,9 @@ def save_user(update: Update):
 
 async def get_groq_response(history, user_input, user_name):
     system_prompt = (
-        "You are Mitsuri Kanroji (Love Hashira). "
-        "Personality: Romantic, bubbly, uses emojis (🍡, 💖). "
-        "Language: Hinglish. Keep it short (max 40 words)."
+        "You are Mitsuri Kanroji from Demon Slayer. "
+        "Personality: Romantic, bubbly, uses emojis barely(🍡, 💖). "
+        "Language: Hinglish. Keep it short (max 10 words)."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
