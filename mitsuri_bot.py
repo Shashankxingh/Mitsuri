@@ -34,14 +34,17 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 ADMIN_GROUP_ID = -1002759296936  # Admin Commands ONLY work here
 
 # === SETUP ===
+# Enhanced Logging Setup
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
+# We quiet down 'httpx' so it doesn't spam your logs with every network request
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 if not GROQ_API_KEY or not TELEGRAM_BOT_TOKEN:
-    logger.critical("❌ Missing API Keys!")
+    logger.critical("❌ Missing API Keys! Please check your .env file.")
 
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 mongo_client = MongoClient(MONGO_URI)
@@ -61,6 +64,9 @@ def health_check():
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
+    # Suppress Flask startup logs to keep console clean
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.ERROR)
     app.run(host='0.0.0.0', port=port)
 
 # ==============================================================================
@@ -93,8 +99,10 @@ def save_user(update: Update):
             {"$set": data}, 
             upsert=True
         )
+        # Log new user interaction (Debug level to avoid spam, or Info if you prefer)
+        logger.debug(f"📝 User saved/updated: {chat.id}")
     except Exception as e:
-        logger.error(f"DB Error: {e}")
+        logger.error(f"❌ DB Error in save_user: {e}")
 
 # ==============================================================================
 # ###                           🧠 AI LOGIC                                  ###
@@ -115,15 +123,18 @@ async def get_groq_response(history, user_input, user_name):
     messages.append({"role": "user", "content": f"{user_input} (User: {user_name})"})
 
     try:
+        logger.info(f"🧠 Generating AI response for {user_name}...")
         completion = await groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.7,
             max_tokens=300,
         )
-        return completion.choices[0].message.content.strip()
+        response_text = completion.choices[0].message.content.strip()
+        logger.info("✅ AI Response generated successfully.")
+        return response_text
     except Exception as e:
-        logger.error(f"Groq Error: {e}")
+        logger.error(f"❌ Groq API Error: {e}")
         return "Ah! Something went wrong... 😵‍💫"
 
 # ==============================================================================
@@ -131,6 +142,8 @@ async def get_groq_response(history, user_input, user_name):
 # ==============================================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    logger.info(f"🚀 /start triggered by {user.first_name} (ID: {user.id})")
     save_user(update)
     await update.message.reply_html("Hii! I am <b>Mitsuri Kanroji</b>! 💖\nLet's eat mochi together!")
 
@@ -139,6 +152,9 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Shows detailed latency stats.
     Accessible by everyone.
     """
+    user = update.effective_user
+    logger.info(f"🏓 /ping triggered by {user.first_name} (ID: {user.id})")
+
     start_time = time.time()
     
     # 1. Send initial message
@@ -163,6 +179,9 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    logger.info(f"ℹ️ /help requested by {user.first_name} (ID: {user.id})")
+    
     help_text = (
         "🌸 <b>Mitsuri's Help Menu</b> 🌸\n\n"
         "I am the Love Hashira! Here is what I can do:\n"
@@ -185,6 +204,7 @@ async def admin_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     if query.from_user.id != OWNER_ID:
+        logger.warning(f"⚠️ Unauthorized admin button press by {query.from_user.id}")
         return
 
     admin_text = (
@@ -219,8 +239,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not is_private:
         now = time.time()
-        if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 3: return
+        if chat_id in GROUP_COOLDOWN and now - GROUP_COOLDOWN[chat_id] < 3: 
+            logger.info(f"⏳ Cooldown active for group {chat_id}")
+            return
         GROUP_COOLDOWN[chat_id] = now
+
+    # LOG: Incoming message
+    logger.info(f"📩 Message from {user.first_name} (ID: {user.id}) in {chat_id}: {text[:30]}...")
 
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
     save_user(update)
@@ -235,7 +260,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         await update.message.reply_html(format_text_to_html(response))
-    except Exception:
+        logger.info(f"📤 Sent reply to {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to send reply to {chat_id}: {e}")
         await update.message.reply_text(response)
 
 # ==============================================================================
@@ -247,14 +274,18 @@ def admin_group_only(func):
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         
-        if user_id != OWNER_ID: return 
-        if chat_id != ADMIN_GROUP_ID: return 
+        if user_id != OWNER_ID: 
+            logger.warning(f"⚠️ Unauthorized admin command attempt by {user_id}")
+            return 
+        if chat_id != ADMIN_GROUP_ID: 
+            return 
             
         return await func(update, context, *args, **kwargs)
     return wrapper
 
 @admin_group_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info("📊 Admin requested stats")
     u_count = chat_collection.count_documents({"type": "private"})
     g_count = chat_collection.count_documents({"type": {"$ne": "private"}})
     await update.message.reply_html(f"<b>📊 Stats</b>\n\n👤 Users: {u_count}\n👥 Groups: {g_count}")
@@ -266,6 +297,7 @@ async def cast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /cast [Message]")
         return
 
+    logger.info(f"📢 Starting broadcast: {msg[:30]}...")
     status_msg = await update.message.reply_text("🚀 Sending...")
     cursor = chat_collection.find({}, {"chat_id": 1})
     
@@ -283,7 +315,8 @@ async def cast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.05) 
         except Exception:
             failed += 1
-            
+    
+    logger.info(f"📢 Broadcast finished. Success: {success}, Failed: {failed}")
     await status_msg.edit_text(f"✅ <b>Done</b>\nSent: {success}\nFailed: {failed}", parse_mode="HTML")
 
 # ==============================================================================
@@ -294,7 +327,7 @@ if __name__ == "__main__":
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
 
-    print("🌸 Mitsuri Bot is Starting...")
+    logger.info("🌸 Mitsuri Bot is Starting...")
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Public Commands
@@ -309,5 +342,6 @@ if __name__ == "__main__":
     
     # Messages
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
+    
+    logger.info("🤖 Polling started...")
     application.run_polling()
