@@ -7,3 +7,4 @@ gunicorn==21.2.0
 cerebras-cloud-sdk==1.4.0
 sambanova==1.2.0
 certifi==2024.8.30
+# redis==5.0.1  <- REMOVED! Not needed for FREE version
