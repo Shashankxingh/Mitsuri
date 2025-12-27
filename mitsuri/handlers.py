@@ -1,16 +1,15 @@
 import asyncio
-import datetime
-import html
 import logging
 import re
 import time
-from collections import defaultdict
+import uuid
 from dataclasses import dataclass
 
 from telegram import Update, constants, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from mitsuri.ai.manager import build_fallback
+from mitsuri.cache import cache
 from mitsuri.config import (
     MODEL_LARGE,
     MODEL_SMALL,
@@ -18,47 +17,22 @@ from mitsuri.config import (
     CEREBRAS_MODEL_SMALL,
     SAMBANOVA_MODEL_LARGE,
     SAMBANOVA_MODEL_SMALL,
-    RATE_LIMIT_WINDOW,
-    RATE_LIMIT_MAX,
     SMALL_TALK_MAX_TOKENS,
+    GROUP_COOLDOWN_SECONDS,
+    BROADCAST_BATCH_SIZE,
+    BROADCAST_BATCH_DELAY,
+    CACHE_COMMON_RESPONSES,
 )
-from mitsuri.storage import save_user, get_chat_history, save_chat_history
+from mitsuri.storage import (
+    save_user,
+    get_chat_history,
+    save_chat_history,
+    get_all_chat_ids,
+    get_stats,
+)
+from mitsuri.utils import format_text_to_html
 
 logger = logging.getLogger(__name__)
-
-
-def format_text_to_html(text):
-    if not text:
-        return ""
-    text = html.escape(text)
-    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"\*(.*?)\*", r"<i>\1</i>", text)
-    text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
-    return text
-
-
-def check_rate_limit(user_id, user_rate_limit):
-    now = time.time()
-    timestamps = user_rate_limit[user_id]
-
-    timestamps[:] = [ts for ts in timestamps if now - ts < RATE_LIMIT_WINDOW]
-
-    if len(timestamps) >= RATE_LIMIT_MAX:
-        return False
-
-    timestamps.append(now)
-    return True
-
-
-@dataclass
-class BotState:
-    chat_collection: object
-    history_collection: object
-    owner_id: int
-    admin_group_id: int
-    provider_fallback: object
-    group_cooldown: dict
-    user_rate_limit: dict
 
 
 SMALL_TALK_PATTERNS = re.compile(
@@ -70,6 +44,7 @@ SMALL_TALK_PATTERNS = re.compile(
 
 
 def is_small_talk(text):
+    """Detect if message is small talk to use faster/cheaper model."""
     tokens = re.findall(r"\w+|[^\w\s]", text)
     token_count = len(tokens)
     if token_count <= SMALL_TALK_MAX_TOKENS:
@@ -78,6 +53,7 @@ def is_small_talk(text):
 
 
 def resolve_model(provider_name, use_large):
+    """Map provider names to their model strings."""
     if provider_name == "cerebras":
         return CEREBRAS_MODEL_LARGE if use_large else CEREBRAS_MODEL_SMALL
     if provider_name == "sambanova":
@@ -85,19 +61,31 @@ def resolve_model(provider_name, use_large):
     return MODEL_LARGE if use_large else MODEL_SMALL
 
 
+@dataclass
+class BotState:
+    chat_collection: object
+    history_collection: object
+    owner_id: int
+    admin_group_id: int
+    provider_fallback: object
+
+
 def build_state(chat_collection, history_collection, owner_id, admin_group_id):
+    """Build bot state with optimized components."""
     return BotState(
         chat_collection=chat_collection,
         history_collection=history_collection,
         owner_id=owner_id,
         admin_group_id=admin_group_id,
         provider_fallback=build_fallback(resolve_model),
-        group_cooldown={},
-        user_rate_limit=defaultdict(list),
     )
 
 
 async def get_ai_response(state, history, user_input, user_name):
+    """
+    Get AI response with intelligent caching.
+    Checks cache first, then calls AI if needed.
+    """
     system_prompt = (
         "You are Mitsuri Kanroji from Demon Slayer. "
         "Personality: Romantic, bubbly, cheerful, and sweet. Use emojis sparingly (🍡, 💖). "
@@ -105,12 +93,19 @@ async def get_ai_response(state, history, user_input, user_name):
         "Keep responses concise and natural - around 1-3 sentences. Be warm and friendly!"
     )
 
+    # Check cache for common responses
+    if CACHE_COMMON_RESPONSES and is_small_talk(user_input):
+        cached = await cache.get_common_response(user_input)
+        if cached:
+            return cached
+
     messages = [{"role": "system", "content": system_prompt}]
     for role, content in history:
         messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": f"{user_input} (User: {user_name})"})
 
     use_large = not is_small_talk(user_input)
+    
     try:
         result = await state.provider_fallback.generate(
             messages=messages,
@@ -119,16 +114,28 @@ async def get_ai_response(state, history, user_input, user_name):
             max_tokens=150,
             top_p=0.9,
         )
-        return result.content
+        
+        response = result.content
+        
+        # Cache common responses for future use
+        if CACHE_COMMON_RESPONSES and is_small_talk(user_input):
+            await cache.cache_common_response(user_input, response)
+        
+        return response
+        
     except Exception as exc:
         logger.error("❌ Provider fallback failed: %s", exc)
         return "Ah! Something went wrong... 😵‍💫 Please try again!"
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start command."""
     user = update.effective_user
     logger.info("🚀 /start triggered by %s (ID: %s)", user.first_name, user.id)
-    save_user(context.bot_data["state"].chat_collection, update)
+    
+    # Save user asynchronously
+    state = context.bot_data["state"]
+    await asyncio.to_thread(save_user, state.chat_collection, update)
 
     welcome_msg = (
         "Kyaa~! 💖 Hii! I am <b>Mitsuri Kanroji</b>!\n\n"
@@ -139,6 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /ping command with latency measurement."""
     user = update.effective_user
     logger.info("🏓 /ping triggered by %s (ID: %s)", user.first_name, user.id)
 
@@ -146,6 +154,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🍡 Pinging...")
     end_time = time.time()
     bot_latency = (end_time - start_time) * 1000
+    
     await msg.edit_text(
         f"🏓 <b>Pong!</b>\n\n"
         f"⚡ <b>Latency:</b> <code>{bot_latency:.2f}ms</code>",
@@ -154,6 +163,7 @@ async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command."""
     user = update.effective_user
     logger.info("ℹ️ /help requested by %s (ID: %s)", user.first_name, user.id)
 
@@ -177,6 +187,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle admin button press."""
     query = update.callback_query
     await query.answer()
 
@@ -195,6 +206,13 @@ async def admin_button_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handle incoming messages with optimized flow:
+    1. Rate limiting via Redis
+    2. Cache checking
+    3. AI generation if needed
+    4. Async database operations
+    """
     if not update.message or not update.message.text:
         return
 
@@ -203,7 +221,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     state = context.bot_data["state"]
 
-    if not check_rate_limit(user.id, state.user_rate_limit):
+    # Rate limiting check (Redis-based)
+    if not await cache.check_rate_limit(user.id):
         logger.warning("⚠️ Rate limit exceeded for user %s", user.id)
         return
 
@@ -229,14 +248,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not should_reply:
         return
 
+    # Group cooldown check (Redis-based)
     if not is_private:
-        now = time.time()
-        if chat_id in state.group_cooldown and now - state.group_cooldown[chat_id] < 3:
+        if not await cache.check_group_cooldown(chat_id, GROUP_COOLDOWN_SECONDS):
             logger.info("⏳ Cooldown active for group %s", chat_id)
             return
-        state.group_cooldown[chat_id] = now
 
-    model_type = "Adaptive"
+    model_type = "Small" if is_small_talk(text) else "Large"
     logger.info(
         "📩 [%s] Message from %s (ID: %s): %s...",
         model_type,
@@ -246,14 +264,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await context.bot.send_chat_action(chat_id=chat_id, action=constants.ChatAction.TYPING)
-    save_user(state.chat_collection, update)
+    
+    # Save user in background
+    asyncio.create_task(
+        asyncio.to_thread(save_user, state.chat_collection, update)
+    )
 
-    history = get_chat_history(state.history_collection, chat_id)
+    # Get history and generate response
+    history = await asyncio.to_thread(get_chat_history, state.history_collection, chat_id)
     response = await get_ai_response(state, history, text, user.first_name)
 
-    save_chat_history(state.history_collection, chat_id, "user", text)
-    save_chat_history(state.history_collection, chat_id, "assistant", response)
+    # Save history in background (non-blocking)
+    asyncio.create_task(
+        asyncio.to_thread(save_chat_history, state.history_collection, chat_id, "user", text)
+    )
+    asyncio.create_task(
+        asyncio.to_thread(save_chat_history, state.history_collection, chat_id, "assistant", response)
+    )
 
+    # Send response
     try:
         await update.message.reply_html(format_text_to_html(response))
         logger.info("📤 [%s] Sent reply to %s", model_type, chat_id)
@@ -266,6 +295,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def admin_group_only(func):
+    """Decorator to restrict commands to admin group only."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         state = context.bot_data["state"]
         user_id = update.effective_user.id
@@ -275,6 +305,7 @@ def admin_group_only(func):
             logger.warning("⚠️ Unauthorized admin command attempt by %s", user_id)
             return
         if chat_id != state.admin_group_id:
+            await update.message.reply_text("⚠️ Admin commands only work in admin group!")
             return
 
         return await func(update, context, *args, **kwargs)
@@ -284,18 +315,23 @@ def admin_group_only(func):
 
 @admin_group_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Get bot statistics with optimized queries."""
     logger.info("📊 Admin requested stats")
     state = context.bot_data["state"]
+    
     try:
-        u_count = state.chat_collection.count_documents({"type": "private"})
-        g_count = state.chat_collection.count_documents({"type": {"$ne": "private"}})
-        total_msgs = state.history_collection.count_documents({})
-
+        # Run stats query in thread to avoid blocking
+        stats_data = await asyncio.to_thread(
+            get_stats,
+            state.chat_collection,
+            state.history_collection
+        )
+        
         await update.message.reply_html(
             f"<b>📊 Mitsuri's Stats</b>\n\n"
-            f"👤 <b>Users:</b> {u_count}\n"
-            f"👥 <b>Groups:</b> {g_count}\n"
-            f"💬 <b>Total Messages:</b> {total_msgs}"
+            f"👤 <b>Users:</b> {stats_data['users']:,}\n"
+            f"👥 <b>Groups:</b> {stats_data['groups']:,}\n"
+            f"💬 <b>Total Messages:</b> {stats_data['messages']:,}"
         )
     except Exception as exc:
         logger.error("❌ Error fetching stats: %s", exc)
@@ -304,40 +340,76 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_group_only
 async def cast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Broadcast message with optimized parallel sending.
+    Handles 100k+ users efficiently with batching.
+    """
     msg = " ".join(context.args)
     if not msg:
         await update.message.reply_text("Usage: /cast [Message]")
         return
 
     logger.info("📢 Starting broadcast: %s...", msg[:30])
-    status_msg = await update.message.reply_text("🚀 Sending broadcast...")
+    status_msg = await update.message.reply_text("🚀 Preparing broadcast...")
     state = context.bot_data["state"]
+    
+    broadcast_id = str(uuid.uuid4())
+    formatted_msg = format_text_to_html(msg)
+    
+    success = 0
+    failed = 0
+    total = 0
 
     try:
-        cursor = state.chat_collection.find({}, {"chat_id": 1})
-        success, failed = 0, 0
-        formatted_msg = format_text_to_html(msg)
-
-        for doc in cursor:
-            try:
-                await context.bot.send_message(
-                    chat_id=doc["chat_id"],
+        # Process in batches for efficiency
+        batch_num = 0
+        
+        for batch in get_all_chat_ids(state.chat_collection, BROADCAST_BATCH_SIZE):
+            batch_num += 1
+            total += len(batch)
+            
+            # Send batch in parallel
+            tasks = [
+                context.bot.send_message(
+                    chat_id=chat_id,
                     text=formatted_msg,
                     parse_mode="HTML",
                 )
-                success += 1
-                await asyncio.sleep(0.05)
-            except Exception as exc:
-                logger.debug("Failed to send to %s: %s", doc["chat_id"], exc)
-                failed += 1
-
-        logger.info("📢 Broadcast finished. Success: %s, Failed: %s", success, failed)
+                for chat_id in batch
+            ]
+            
+            # Execute batch concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Count results
+            for result in results:
+                if isinstance(result, Exception):
+                    failed += 1
+                else:
+                    success += 1
+            
+            # Update status every 5 batches
+            if batch_num % 5 == 0:
+                await status_msg.edit_text(
+                    f"📤 Broadcasting...\n"
+                    f"✅ Sent: {success:,}\n"
+                    f"❌ Failed: {failed:,}\n"
+                    f"📊 Progress: {success + failed:,} / ~{total:,}"
+                )
+            
+            # Rate limit delay between batches
+            await asyncio.sleep(BROADCAST_BATCH_DELAY)
+        
+        logger.info("📢 Broadcast finished. Success: %d, Failed: %d", success, failed)
+        
         await status_msg.edit_text(
             f"✅ <b>Broadcast Complete!</b>\n\n"
-            f"📤 Sent: {success}\n"
-            f"❌ Failed: {failed}",
+            f"📤 Sent: {success:,}\n"
+            f"❌ Failed: {failed:,}\n"
+            f"📊 Total: {total:,}",
             parse_mode="HTML",
         )
+        
     except Exception as exc:
         logger.error("❌ Broadcast error: %s", exc)
         await status_msg.edit_text("❌ Broadcast failed!")
