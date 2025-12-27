@@ -1,0 +1,1 @@
+"""Mitsuri bot package."""
