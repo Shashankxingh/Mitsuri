@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# API Keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY")
 SAMBANOVA_API_KEY = os.getenv("SAMBANOVA_API_KEY")
@@ -12,8 +13,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = os.getenv("OWNER_ID")
 
+# Redis for caching and rate limiting
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1002759296936"))
 
+# Model Configuration
 MODEL_LARGE = os.getenv("MODEL_LARGE", "llama-3.3-70b-versatile")
 MODEL_SMALL = os.getenv("MODEL_SMALL", "llama-3.1-8b-instant")
 
@@ -29,9 +34,27 @@ PROVIDER_ORDER = [
     if provider.strip()
 ]
 
+# Rate Limiting
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
 RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "10"))
 SMALL_TALK_MAX_TOKENS = int(os.getenv("SMALL_TALK_MAX_TOKENS", "4"))
+
+# Performance Tuning
+MONGO_MAX_POOL_SIZE = int(os.getenv("MONGO_MAX_POOL_SIZE", "50"))
+MONGO_MIN_POOL_SIZE = int(os.getenv("MONGO_MIN_POOL_SIZE", "10"))
+HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "6"))
+MAX_HISTORY_STORED = int(os.getenv("MAX_HISTORY_STORED", "20"))
+
+# Caching
+CACHE_COMMON_RESPONSES = os.getenv("CACHE_COMMON_RESPONSES", "true").lower() == "true"
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+
+# Broadcasting
+BROADCAST_BATCH_SIZE = int(os.getenv("BROADCAST_BATCH_SIZE", "30"))
+BROADCAST_BATCH_DELAY = float(os.getenv("BROADCAST_BATCH_DELAY", "1.0"))
+
+# Group cooldown
+GROUP_COOLDOWN_SECONDS = int(os.getenv("GROUP_COOLDOWN_SECONDS", "3"))
 
 def require_env():
     missing = [
