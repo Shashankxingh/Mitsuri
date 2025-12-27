@@ -13,8 +13,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = os.getenv("OWNER_ID")
 
-# Redis for caching and rate limiting
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# NO REDIS NEEDED! Uses in-memory cache instead (100% FREE)
 
 ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1002759296936"))
 
@@ -34,26 +33,26 @@ PROVIDER_ORDER = [
     if provider.strip()
 ]
 
-# Rate Limiting
+# Rate Limiting (In-Memory - FREE!)
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "60"))
 RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "10"))
 SMALL_TALK_MAX_TOKENS = int(os.getenv("SMALL_TALK_MAX_TOKENS", "4"))
 
-# Performance Tuning
+# Performance Tuning (100% FREE)
 MONGO_MAX_POOL_SIZE = int(os.getenv("MONGO_MAX_POOL_SIZE", "50"))
 MONGO_MIN_POOL_SIZE = int(os.getenv("MONGO_MIN_POOL_SIZE", "10"))
 HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "6"))
 MAX_HISTORY_STORED = int(os.getenv("MAX_HISTORY_STORED", "20"))
 
-# Caching
+# Caching (In-Memory - FREE!)
 CACHE_COMMON_RESPONSES = os.getenv("CACHE_COMMON_RESPONSES", "true").lower() == "true"
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 
-# Broadcasting
+# Broadcasting (100% FREE)
 BROADCAST_BATCH_SIZE = int(os.getenv("BROADCAST_BATCH_SIZE", "30"))
 BROADCAST_BATCH_DELAY = float(os.getenv("BROADCAST_BATCH_DELAY", "1.0"))
 
-# Group cooldown
+# Group cooldown (In-Memory - FREE!)
 GROUP_COOLDOWN_SECONDS = int(os.getenv("GROUP_COOLDOWN_SECONDS", "3"))
 
 def require_env():
